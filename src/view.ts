@@ -91,6 +91,8 @@ export class DashboardView extends ItemView {
   // Event-driven
   private vaultEvents: Events | null = null;
   private debouncedRefresh: (() => void) | null = null;
+  private _isRendering = false;
+  private _renderCooldown = 0;
 
   // KPI data
   private inboxCount = 0;
@@ -281,7 +283,10 @@ export class DashboardView extends ItemView {
 
   private unregisterVaultEvents() { this.vaultEvents = null; }
 
-  private handleVaultChange = () => { this.debouncedRefresh?.(); };
+  private handleVaultChange = () => {
+    if (this._isRendering || Date.now() < this._renderCooldown) return;
+    this.debouncedRefresh?.();
+  };
 
   /** Listen for vault-scan-finish custom event */
   private registerVaultScanListener(): void {
@@ -412,126 +417,129 @@ export class DashboardView extends ItemView {
   // ==================== MAIN RENDER ====================
 
   private async render() {
-    const settings = this.plugin.settings;
-    const container = this.containerEl;
+    this._isRendering = true;
+    try {
+      const settings = this.plugin.settings;
+      const container = this.containerEl;
 
-    // Parallel independent I/O
-    const [stats] = await Promise.all([
-      this.stats || scanVault(this.app, settings.wikis),
-      this.computeKpiData(),
-    ]);
-    if (!this.stats) this.stats = stats;
+      // Parallel independent I/O
+      const [stats] = await Promise.all([
+        this.stats || scanVault(this.app, settings.wikis),
+        this.computeKpiData(),
+      ]);
+      if (!this.stats) this.stats = stats;
 
-    // v2.1 [5] — Single vault scan (cached for heatmap, vaultHealth, inbox)
-    if (!this.vaultHealthData && this.vaultScanner) {
-      try {
-        const scanResult = await this.vaultScanner.scanFull((pct, msg) => {
-          // 可选：更新 Banner 进度条
-          this.updateScanProgress(pct, msg);
-        });
-        if (scanResult.ok) this.vaultHealthData = scanResult.value;
-        this.clearScanProgress();
-      }
-      catch { /* degrade gracefully */ }
-    }
-
-    const app = div('ax-app');
-    app.addClass('apex-dashboard-root');
-    app.setAttribute('data-theme', settings.theme);
-    app.addClass('axlumen-theme-' + settings.theme);
-
-    // v2.1 [1] — Banner with integrated compact focus
-    this.initFocusData();
-    app.appendChild(this.createBanner());
-
-    // Main layout: Sidebar + Kanban
-    const mainLayout = div('ax-main-layout');
-
-    // ---- Left Sidebar ----
-    const sidebar = div('ax-sidebar');
-    if (this.sidebarPinned) sidebar.addClass('ax-sidebar--pinned');
-    else if (this.sidebarExpanded) sidebar.addClass('ax-sidebar--expanded');
-    else sidebar.addClass('ax-sidebar--collapsed');
-    await this.renderWidgetSidebar(sidebar);
-    mainLayout.appendChild(sidebar);
-
-    const slimIndicator = div('ax-sidebar-slim-indicator');
-    mainLayout.appendChild(slimIndicator);
-
-    // ---- Kanban Content ----
-    const content = div('ax-kanban-wrapper');
-
-    // Overview page (Kanban)
-    const pageOverview = div('ax-page');
-    pageOverview.setAttribute('data-page', 'overview');
-    const kanban = div('ax-kanban');
-
-    // Initialize lazy renderer with kanban as scroll root
-    this.lazyRenderer = new LazyRenderer(kanban);
-
-    const order = this.getCardOrder();
-    const FIRST_SCREEN_COUNT = 4;
-    for (let i = 0; i < order.length; i++) {
-      const cardId = order[i];
-      try {
-        const card = this.createCardById(cardId);
-        if (card) {
-          kanban.appendChild(card);
-          // Force render first N cards (首屏)
-          if (i < FIRST_SCREEN_COUNT) {
-            const contentEl = card.querySelector('.ax-card-lazy-content') as HTMLElement;
-            if (contentEl) this.lazyRenderer.forceRender(contentEl);
-          }
+      // v2.1 [5] — Single vault scan (cached for heatmap, vaultHealth, inbox)
+      if (!this.vaultHealthData && this.vaultScanner) {
+        try {
+          const scanResult = await this.vaultScanner.scanIncremental();
+          if (scanResult.ok) this.vaultHealthData = scanResult.value;
         }
-      } catch (e) {
-        console.error('[DASHBOARD]', 'WIDGET_RENDER_FAILED', cardId, e);
-        kanban.appendChild(renderErrorState({
-          code: 'WIDGET_RENDER_FAILED',
-          message: cardId + ' 加载失败',
-          recoverable: false,
-        }));
+        catch { /* degrade gracefully */ }
       }
+
+      const app = div('ax-app');
+      app.addClass('apex-dashboard-root');
+      app.setAttribute('data-theme', settings.theme);
+      app.addClass('axlumen-theme-' + settings.theme);
+
+      // v2.1 [1] — Banner with integrated compact focus
+      this.initFocusData();
+      app.appendChild(this.createBanner());
+
+      // Main layout: Sidebar + Kanban
+      const mainLayout = div('ax-main-layout');
+
+      // ---- Left Sidebar ----
+      const sidebar = div('ax-sidebar');
+      if (this.sidebarPinned) sidebar.addClass('ax-sidebar--pinned');
+      else if (this.sidebarExpanded) sidebar.addClass('ax-sidebar--expanded');
+      else sidebar.addClass('ax-sidebar--collapsed');
+      await this.renderWidgetSidebar(sidebar);
+      mainLayout.appendChild(sidebar);
+
+      const slimIndicator = div('ax-sidebar-slim-indicator');
+      mainLayout.appendChild(slimIndicator);
+
+      // ---- Kanban Content ----
+      const content = div('ax-kanban-wrapper');
+
+      // Overview page (Kanban)
+      const pageOverview = div('ax-page');
+      pageOverview.setAttribute('data-page', 'overview');
+      const kanban = div('ax-kanban');
+
+      // Initialize lazy renderer with kanban as scroll root
+      this.lazyRenderer = new LazyRenderer(kanban);
+
+      const order = this.getCardOrder();
+      const FIRST_SCREEN_COUNT = 4;
+      for (let i = 0; i < order.length; i++) {
+        const cardId = order[i];
+        try {
+          const card = this.createCardById(cardId);
+          if (card) {
+            kanban.appendChild(card);
+            // Force render first N cards (首屏)
+            if (i < FIRST_SCREEN_COUNT) {
+              const contentEl = card.querySelector('.ax-card-lazy-content') as HTMLElement;
+              if (contentEl) this.lazyRenderer.forceRender(contentEl);
+            }
+          }
+        } catch (e) {
+          console.error('[DASHBOARD]', 'WIDGET_RENDER_FAILED', cardId, e);
+          kanban.appendChild(renderErrorState({
+            code: 'WIDGET_RENDER_FAILED',
+            message: cardId + ' 加载失败',
+            recoverable: false,
+          }));
+        }
+      }
+      kanban.appendChild(this.createFooter());
+      pageOverview.appendChild(kanban);
+      content.appendChild(pageOverview);
+
+      // Vault page
+      const pageVault = div('ax-page');
+      pageVault.setAttribute('data-page', 'vault');
+      pageVault.appendChild(this.createVaultSection());
+      pageVault.appendChild(this.createFooter());
+      content.appendChild(pageVault);
+
+      // Graph page
+      const pageGraph = div('ax-page');
+      pageGraph.setAttribute('data-page', 'graph');
+      pageGraph.appendChild(this.createGraphSection());
+      pageGraph.appendChild(this.createFooter());
+      content.appendChild(pageGraph);
+
+      mainLayout.appendChild(content);
+      app.appendChild(mainLayout);
+
+      container.appendChild(app);
+      container.appendChild(el('div', { class: 'ax-toast' }));
+
+      this.switchPage(this.currentPage);
+      this.startClock();
+      this.setupSidebarBehavior(sidebar, slimIndicator);
+      this.setupQuoteRotation();
+      this.refreshBanner();
+
+      // Entrance animations
+      requestAnimationFrame(() => {
+        setTimeout(() => {
+          const cards = container.querySelectorAll<HTMLElement>(
+            '.ax-panel, .ax-card, .ax-section-row',
+          );
+          staggerEntrance(Array.from(cards), 60);
+          animateProgressBars(container);
+        }, 50);
+      });
+
+      this._renderCooldown = Date.now() + 2000;
+    } finally {
+      this._isRendering = false;
     }
-    kanban.appendChild(this.createFooter());
-    pageOverview.appendChild(kanban);
-    content.appendChild(pageOverview);
-
-    // Vault page
-    const pageVault = div('ax-page');
-    pageVault.setAttribute('data-page', 'vault');
-    pageVault.appendChild(this.createVaultSection());
-    pageVault.appendChild(this.createFooter());
-    content.appendChild(pageVault);
-
-    // Graph page
-    const pageGraph = div('ax-page');
-    pageGraph.setAttribute('data-page', 'graph');
-    pageGraph.appendChild(this.createGraphSection());
-    pageGraph.appendChild(this.createFooter());
-    content.appendChild(pageGraph);
-
-    mainLayout.appendChild(content);
-    app.appendChild(mainLayout);
-
-    container.appendChild(app);
-    container.appendChild(el('div', { class: 'ax-toast' }));
-
-    this.switchPage(this.currentPage);
-    this.startClock();
-    this.setupSidebarBehavior(sidebar, slimIndicator);
-    this.setupQuoteRotation();
-    this.refreshBanner();
-
-    // Entrance animations
-    requestAnimationFrame(() => {
-      setTimeout(() => {
-        const cards = container.querySelectorAll<HTMLElement>(
-          '.ax-panel, .ax-card, .ax-section-row',
-        );
-        staggerEntrance(Array.from(cards), 60);
-        animateProgressBars(container);
-      }, 50);
-    });
   }
 
   // ==================== Widget Sidebar ====================

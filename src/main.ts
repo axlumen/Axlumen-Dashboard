@@ -284,7 +284,7 @@ export default class AxlumenDashboardPlugin extends Plugin {
     const dot = this.statusBarEl.createDiv({ cls: 'axlumen-sb-dot axlumen-sb-dot--idle' });
     dot.title = 'Axlumen Dashboard';
 
-    this.vaultScanner.scanFullVault().then(result => {
+    this.vaultScanner.scanIncremental().then(result => {
       if (result.ok) {
         const count = result.value.inboxFiles?.length || 0;
         if (count > 0) {
