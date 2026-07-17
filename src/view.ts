@@ -981,7 +981,7 @@ export class DashboardView extends ItemView {
     const brand = div('ax-banner-brand');
     const brandMark = div('ax-header-mark');
     brandMark.innerHTML =
-      '<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">' +
+      '<svg width="12" height="12" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">' +
       '<path d="M8 1L14 4.5V11.5L8 15L2 11.5V4.5L8 1Z" ' +
       'fill="none" stroke="currentColor" stroke-width="1.2"/>' +
       '<path d="M5 8L7 10L11 6" fill="none" stroke="currentColor" ' +
