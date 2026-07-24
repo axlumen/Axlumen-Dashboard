@@ -4777,6 +4777,71 @@
 }
 
 /* ========================================================================
+   MEMO — TEXTAREA & WIKILINK
+   ======================================================================== */
+
+.ax-memo-textarea {
+  flex: 1;
+  border: none;
+  outline: none;
+  background: transparent;
+  resize: none;
+  padding: 6px 10px 10px;
+  font-size: 12px;
+  color: var(--ax-ink);
+  font-family: var(--ax-font-ui);
+  line-height: 1.6;
+  min-height: 80px;
+  overflow-y: auto;
+  word-break: break-word;
+}
+.ax-memo-textarea::placeholder {
+  color: var(--ax-faint);
+}
+
+.ax-memo-wikilinks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 0 10px 8px;
+  min-height: 0;
+}
+.ax-memo-wikilink-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 7px;
+  border-radius: var(--ax-radius-s);
+  background: var(--ax-blue-bg);
+  color: var(--ax-blue);
+  font-size: 10px;
+  font-family: var(--ax-font-data);
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background 150ms var(--ax-ease), border-color 150ms var(--ax-ease);
+  white-space: nowrap;
+}
+.ax-memo-wikilink-chip:hover {
+  background: var(--ax-blue);
+  color: var(--ax-surface);
+  border-color: var(--ax-blue);
+}
+.ax-memo-wikilink-chip::before {
+  content: '';
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--ax-blue);
+}
+.ax-memo-wikilink-chip:hover::before {
+  background: var(--ax-surface);
+}
+
+.ax-memo-card--editing .ax-memo-card-body {
+  cursor: text;
+}
+
+/* ========================================================================
    LUNAR — 农历今日
    ======================================================================== */
 
