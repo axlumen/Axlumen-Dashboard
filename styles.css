@@ -1264,13 +1264,32 @@
   user-select: none;
 }
 
-/* Section 折叠状态 */
-.ax-section-row--collapsed > *:not(.ax-section-header):not(.ax-section-grip) {
-  display: none;
+/* Section 折叠状态 — CSS transition 动画 */
+.ax-section-cards,
+.ax-section-resize-handle {
+  transition: max-height 0.3s ease, opacity 0.25s ease;
 }
+
+.ax-section-row--collapsed .ax-section-cards {
+  max-height: 0 !important;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.ax-section-row--collapsed .ax-section-resize-handle {
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+}
+
 .ax-section-row--collapsed {
   height: auto !important;
   max-height: none !important;
+}
+
+.ax-section-row--collapsed .ax-section-header {
+  margin-bottom: 0;
 }
 
 /* 折叠按钮 */

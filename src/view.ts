@@ -1162,22 +1162,31 @@ export class DashboardView extends ItemView {
     // Section-level collapse via toggle button
     const toggleBtn = card.querySelector('.ax-section-toggle') as HTMLElement;
     if (toggleBtn) {
+      toggleBtn.setAttribute('aria-expanded', String(!isCollapsed));
+      toggleBtn.setAttribute('aria-label', isCollapsed ? '展开' : '折叠');
+
       this.regDom(toggleBtn, 'click', (e) => {
         e.stopPropagation();
         const collapsed = card.hasClass('ax-section-row--collapsed');
         card.toggleClass('ax-section-row--collapsed', !collapsed);
+        const newState = !collapsed;
+        toggleBtn.setAttribute('aria-expanded', String(newState));
+        toggleBtn.setAttribute('aria-label', newState ? '展开' : '折叠');
+
         const state = this.getCardCollapseState();
-        state[cardId] = !collapsed;
+        state[cardId] = newState;
         this.saveCardCollapseState(state);
 
         // Handle lazy rendering on expand/collapse
         if (contentArea && renderFn && this.lazyRenderer) {
           if (!collapsed) {
+            // Expanding — register for lazy render after transition settles
             setTimeout(() => {
               this.lazyRenderer!.register(contentArea, renderFn);
               card.removeClass('ax-card--skeleton');
             }, 0);
           } else {
+            // Collapsing — unregister and clean up
             this.lazyRenderer.unregister(contentArea);
           }
         }
