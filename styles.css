@@ -2533,10 +2533,143 @@
    PROJECTS
    ======================================================================== */
 
+.ax-projects-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+  padding: 0 4px 8px;
+}
+.ax-projects-layout-btn {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--ax-line);
+  border-radius: var(--ax-radius-s);
+  background: var(--ax-surface);
+  color: var(--ax-muted);
+  cursor: pointer;
+  transition: color 150ms var(--ax-ease), border-color 150ms var(--ax-ease), background 150ms var(--ax-ease);
+}
+.ax-projects-layout-btn:hover {
+  color: var(--ax-ink);
+  border-color: var(--ax-line-strong);
+}
+.ax-projects-layout-btn.is-active {
+  color: var(--ax-accent);
+  background: var(--ax-accent-bg);
+  border-color: var(--ax-accent);
+}
+
+/* Grid layout (default) */
+.ax-projects-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+/* List layout */
+.ax-projects-grid.ax-projects-grid--list {
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+.ax-projects-grid.ax-projects-grid--list .ax-project-card {
+  flex-direction: row;
+  align-items: center;
+}
+.ax-projects-grid.ax-projects-grid--list .ax-project-cover {
+  width: 80px;
+  height: 48px;
+  min-width: 80px;
+  margin-bottom: 0;
+  margin-right: 12px;
+}
+.ax-projects-grid.ax-projects-grid--list .ax-project-info {
+  flex: 1;
+  min-width: 0;
+}
+.ax-projects-grid.ax-projects-grid--list .ax-project-info p {
+  -webkit-line-clamp: 1;
+}
+
+/* Card */
+.ax-project-card {
+  display: flex;
+  flex-direction: column;
+  background: var(--ax-surface-2);
+  border: 1px solid var(--ax-line);
+  border-radius: var(--ax-radius-m);
+  cursor: pointer;
+  transition: background 150ms var(--ax-ease), border-color 150ms var(--ax-ease), box-shadow 150ms var(--ax-ease);
+  text-decoration: none;
+  overflow: hidden;
+}
+.ax-project-card:hover {
+  border-color: var(--ax-line-strong);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+/* Cover */
+.ax-project-cover {
+  height: 100px;
+  border-radius: var(--ax-radius-s) var(--ax-radius-s) 0 0;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--ax-accent) 8%, transparent);
+  border-bottom: 1px solid var(--ax-line);
+  overflow: hidden;
+  position: relative;
+}
+.ax-project-cover em {
+  font-style: normal;
+  font-size: 24px;
+  color: var(--ax-accent);
+  z-index: 1;
+}
+.ax-project-cover--image {
+  background-size: cover;
+  background-position: center;
+}
+.ax-project-cover--image em {
+  display: none;
+}
+
+/* Info */
+.ax-project-info {
+  padding: 10px 12px 12px;
+}
+.ax-project-info h3 {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ax-ink);
+  font-family: var(--ax-font-ui);
+  margin: 4px 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ax-project-info p {
+  font-size: 11px;
+  color: var(--ax-muted);
+  font-family: var(--ax-font-ui);
+  margin-bottom: 6px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.ax-project-trace {
+  font-size: 10px;
+  color: var(--ax-faint);
+  font-family: var(--ax-font-data);
+  letter-spacing: 0.02em;
+}
+
+/* Legacy selectors kept for backward compat */
 .ax-project-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
 }
 .ax-project {
   padding: 12px;
@@ -2550,37 +2683,6 @@
 }
 .ax-project:hover {
   border-color: var(--ax-line-strong);
-}
-.ax-project-cover {
-  height: 56px;
-  border-radius: var(--ax-radius-s);
-  display: grid;
-  place-items: center;
-  margin-bottom: 8px;
-  background: color-mix(in srgb, var(--ax-accent) 8%, transparent);
-  border: 1px solid var(--ax-line);
-}
-.ax-project-cover em {
-  font-style: normal;
-  font-size: 20px;
-  color: var(--ax-accent);
-}
-.ax-project h3 {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--ax-ink);
-  font-family: var(--ax-font-ui);
-  margin: 4px 0;
-}
-.ax-project p {
-  font-size: 11px;
-  color: var(--ax-muted);
-  font-family: var(--ax-font-ui);
-  margin-bottom: 8px;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
 }
 .ax-trace {
   font-size: 10px;

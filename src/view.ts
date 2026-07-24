@@ -2266,23 +2266,79 @@ export class DashboardView extends ItemView {
     return container;
   }
 
-  /** Projects content — lazy */
+  /** Projects content — lazy, with cover images and grid/list toggle */
   private createProjectsContent(): HTMLElement {
     const container = div('ax-projects-lazy-content');
-    const grid = div('ax-project-grid');
-    this.plugin.settings.projects.forEach((proj: any) => {
-      const card = el('a', { href: '#', class: 'ax-project', 'data-path': proj.path });
-      card.innerHTML =
-        '<div class="ax-project-cover" style="background:' + esc(proj.gradient) + '">' +
-          '<em>' + esc(proj.emoji) + '</em>' +
-        '</div>' +
-        '<span class="ax-tag ax-tag-' + esc(proj.priority) + '">' + esc(proj.tag) + '</span>' +
-        '<h3>' + esc(proj.name) + '</h3>' +
-        '<p>' + esc(proj.description) + '</p>' +
-        '<div class="ax-trace">' + esc(proj.trace) + '</div>';
+
+    // Layout toggle toolbar
+    const toolbar = div('ax-projects-toolbar');
+    const gridBtn = el('button', { class: 'ax-projects-layout-btn is-active', type: 'button', title: '网格布局' });
+    gridBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>';
+    const listBtn = el('button', { class: 'ax-projects-layout-btn', type: 'button', title: '列表布局' });
+    listBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/></svg>';
+    toolbar.appendChild(gridBtn);
+    toolbar.appendChild(listBtn);
+
+    const grid = div('ax-projects-grid');
+
+    this.plugin.settings.projects.forEach((proj: ProjectCard) => {
+      const card = el('a', { href: '#', class: 'ax-project-card', 'data-path': proj.path });
+
+      // Cover image or gradient+emoji fallback
+      const cover = div('ax-project-cover');
+      if (proj.cover) {
+        const resolvedCover = resolveVaultImage(this.app, proj.cover);
+        if (resolvedCover) {
+          cover.style.backgroundImage = 'url(' + resolvedCover + ')';
+          cover.addClass('ax-project-cover--image');
+        } else {
+          cover.style.background = proj.gradient || '';
+          cover.innerHTML = '<em>' + esc(proj.emoji) + '</em>';
+        }
+      } else {
+        cover.style.background = proj.gradient || '';
+        cover.innerHTML = '<em>' + esc(proj.emoji) + '</em>';
+      }
+      card.appendChild(cover);
+
+      // Info block
+      const info = div('ax-project-info');
+      const tagEl = el('span', { class: 'ax-tag ax-tag-' + esc(proj.priority) });
+      tagEl.textContent = proj.tag;
+      info.appendChild(tagEl);
+
+      const nameEl = el('h3');
+      nameEl.textContent = proj.name;
+      info.appendChild(nameEl);
+
+      const descEl = el('p');
+      descEl.textContent = proj.description;
+      info.appendChild(descEl);
+
+      if (proj.trace) {
+        const traceEl = div('ax-project-trace');
+        traceEl.textContent = proj.trace;
+        info.appendChild(traceEl);
+      }
+      card.appendChild(info);
+
       this.regDom(card, 'click', (e) => { e.preventDefault(); this.openPath(proj.path); });
       grid.appendChild(card);
     });
+
+    // Toggle between grid and list layout
+    this.regDom(gridBtn, 'click', () => {
+      gridBtn.addClass('is-active');
+      listBtn.removeClass('is-active');
+      grid.removeClass('ax-projects-grid--list');
+    });
+    this.regDom(listBtn, 'click', () => {
+      listBtn.addClass('is-active');
+      gridBtn.removeClass('is-active');
+      grid.addClass('ax-projects-grid--list');
+    });
+
+    container.appendChild(toolbar);
     container.appendChild(grid);
     return container;
   }
