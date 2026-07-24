@@ -47,6 +47,7 @@ import { AutomationEngine } from './services/AutomationEngine';
 import { CompositeDisposable } from './utils/CompositeDisposable';
 import { LazyRenderer } from './utils/LazyRenderer';
 import { renderErrorState } from './utils/ServiceResult';
+import { FeedCache } from './services/FeedCache';
 import type { WidgetHandle, Disposable } from './types';
 import { PomodoroService } from './services/PomodoroService';
 import { fetchWeather, weatherCodeToEmoji, weatherCodeToDescription } from './services/WeatherService';
@@ -165,6 +166,8 @@ export class DashboardView extends ItemView {
   // Page definitions
   private readonly pages = [
     { id: 'overview', icon: 'grid', label: '总览' },
+    { id: 'tasks', icon: 'map', label: '任务' },
+    { id: 'calendar', icon: 'graph', label: '日历' },
   ];
 
   // Lazy renderer for Kanban cards
@@ -597,19 +600,19 @@ export class DashboardView extends ItemView {
       pageOverview.appendChild(this.createFooter());
       content.appendChild(pageOverview);
 
-      // Vault page
-      const pageVault = div('ax-page');
-      pageVault.setAttribute('data-page', 'vault');
-      pageVault.appendChild(this.createVaultSection());
-      pageVault.appendChild(this.createFooter());
-      content.appendChild(pageVault);
+      // Tasks page
+      const pageTasks = div('ax-page ax-page-hidden');
+      pageTasks.setAttribute('data-page', 'tasks');
+      pageTasks.appendChild(this.createTodosSectionSync());
+      pageTasks.appendChild(this.createFooter());
+      content.appendChild(pageTasks);
 
-      // Graph page
-      const pageGraph = div('ax-page');
-      pageGraph.setAttribute('data-page', 'graph');
-      pageGraph.appendChild(this.createGraphSection());
-      pageGraph.appendChild(this.createFooter());
-      content.appendChild(pageGraph);
+      // Calendar page
+      const pageCalendar = div('ax-page ax-page-hidden');
+      pageCalendar.setAttribute('data-page', 'calendar');
+      pageCalendar.appendChild(this.createCalendarContent());
+      pageCalendar.appendChild(this.createFooter());
+      content.appendChild(pageCalendar);
 
       mainLayout.appendChild(content);
       app.appendChild(mainLayout);
@@ -647,16 +650,20 @@ export class DashboardView extends ItemView {
     const scroll = div('ax-sidebar-scroll');
     const widgets = this.plugin.settings.widgets;
 
-    // 1. Tab navigation (page switching — essential)
+    // 1. Brand + Theme Toggle (top)
+    scroll.appendChild(this.createSidebarBrand());
+    scroll.appendChild(div('ax-sidebar-divider'));
+
+    // 2. Navigation (Tabs): 总览、任务、日历
     scroll.appendChild(this.createSidebarNav());
     scroll.appendChild(div('ax-sidebar-divider'));
 
-    // 2. Quick Actions (top actions — essential)
+    // 3. Quick Actions: 新建日记、深度调研、刷新 RSS
     this.initQuickActions();
     scroll.appendChild(this.createSidebarQuickActions());
     scroll.appendChild(div('ax-sidebar-divider'));
 
-    // 2.5 Pomodoro (if enabled)
+    // 4. Pomodoro Timer (if enabled)
     if (this.plugin.settings.pomodoroEnabled) {
       try {
         scroll.appendChild(this.createSidebarPomodoro());
@@ -666,7 +673,7 @@ export class DashboardView extends ItemView {
       }
     }
 
-    // 2.6 Weather (if enabled)
+    // 5. Weather Widget (if enabled)
     if (this.plugin.settings.widgetWeatherEnabled) {
       try {
         scroll.appendChild(await this.createSidebarWeather());
@@ -676,7 +683,29 @@ export class DashboardView extends ItemView {
       }
     }
 
-    // 3. Agent & Workflows (core feature)
+    // 6. Heatmap Widget
+    try {
+      const heatmapEl = this.createSidebarHeatmap();
+      if (heatmapEl) {
+        scroll.appendChild(heatmapEl);
+        scroll.appendChild(div('ax-sidebar-divider'));
+      }
+    } catch (e) {
+      console.error('[DASHBOARD]', 'HEATMAP_FAILED', e);
+    }
+
+    // 7. Countdown Widget
+    try {
+      const countdownEl = this.createSidebarCountdown();
+      if (countdownEl) {
+        scroll.appendChild(countdownEl);
+        scroll.appendChild(div('ax-sidebar-divider'));
+      }
+    } catch (e) {
+      console.error('[DASHBOARD]', 'COUNTDOWN_FAILED', e);
+    }
+
+    // 8. Agent & Workflows: Agent 状态、Workflow 列表
     try {
       scroll.appendChild(await this.createCombinedAgentPanel());
     } catch (e) {
@@ -687,7 +716,7 @@ export class DashboardView extends ItemView {
     }
     scroll.appendChild(div('ax-sidebar-divider'));
 
-    // 4. Inbox Router (uses cached vaultHealthData — no extra scan)
+    // 9. Inbox Router: 待处理文件
     try {
       const inboxFiles = this.vaultHealthData?.inboxFiles ?? [];
       const { section: irSection, handle: irHandle } = createInboxRouterPanel(
@@ -704,6 +733,16 @@ export class DashboardView extends ItemView {
       this.composite.add(irHandle);
     } catch (e) {
       console.error('[DASHBOARD]', 'INBOX_ROUTER_FAILED', e);
+    }
+
+    // 10. Feeds: RSS 订阅源
+    try {
+      const feedsEl = this.createSidebarFeeds();
+      if (feedsEl) {
+        scroll.appendChild(feedsEl);
+      }
+    } catch (e) {
+      console.error('[DASHBOARD]', 'SIDEBAR_FEEDS_FAILED', e);
     }
 
     sidebar.appendChild(scroll);
@@ -752,6 +791,138 @@ export class DashboardView extends ItemView {
       grid.appendChild(btn);
     });
     section.appendChild(grid);
+    return section;
+  }
+
+  /** Sidebar Brand header with theme toggle */
+  private createSidebarBrand(): HTMLElement {
+    const brand = div('ax-sidebar-brand');
+    const mark = div('ax-sidebar-brand-mark');
+    mark.innerHTML = icon('grid', 14);
+    brand.appendChild(mark);
+
+    const text = div('ax-sidebar-brand-text');
+    const nameEl = div('ax-sidebar-brand-name');
+    nameEl.textContent = this.plugin.settings.brandName || 'Axlumen';
+    const subEl = div('ax-sidebar-brand-sub');
+    subEl.textContent = this.plugin.settings.brandSub || 'Dashboard';
+    text.appendChild(nameEl);
+    text.appendChild(subEl);
+    brand.appendChild(text);
+
+    const themeBtn = el('button', { class: 'ax-sidebar-theme-btn', type: 'button', title: '切换主题' });
+    const isDark = document.body.hasClass('theme-dark');
+    themeBtn.textContent = isDark ? '🌙' : '☀️';
+    this.regDom(themeBtn, 'click', () => {
+      const current = this.plugin.settings.theme;
+      const next = current === 'island' ? 'nordic' : 'island';
+      this.plugin.settings.theme = next;
+      void this.plugin.saveSettings();
+      const nowDark = document.body.hasClass('theme-dark');
+      themeBtn.textContent = nowDark ? '🌙' : '☀️';
+      void this.refresh();
+    });
+    brand.appendChild(themeBtn);
+
+    return brand;
+  }
+
+  /** Sidebar Heatmap widget — compact writing activity visualization */
+  private createSidebarHeatmap(): HTMLElement | null {
+    const section = div('ax-sidebar-heatmap');
+    const label = div('ax-sidebar-section-label');
+    label.textContent = '活动热力图';
+    section.appendChild(label);
+
+    const grid = div('ax-sidebar-heatmap-grid');
+    // Generate a compact 7×4 heatmap grid (4 weeks)
+    const now = new Date();
+    const dailyActivity = this.vaultHealthData?.dailyActivityMultiDim?.notes ?? [];
+    for (let i = 27; i >= 0; i--) {
+      const d = new Date(now);
+      d.setDate(d.getDate() - i);
+      const dateStr = d.toISOString().slice(0, 10);
+      const cell = div('ax-sidebar-heatmap-cell');
+      // Find activity for this date
+      const dayActivity = dailyActivity.find((a: any) => a.date === dateStr);
+      const count = dayActivity?.count ?? 0;
+      const level = count === 0 ? 0 : count <= 2 ? 1 : count <= 5 ? 2 : count <= 10 ? 3 : 4;
+      if (level > 0) cell.setAttribute('data-level', String(level));
+      cell.title = dateStr + ' (' + count + ' notes)';
+      grid.appendChild(cell);
+    }
+    section.appendChild(grid);
+    return section;
+  }
+
+  /** Sidebar Countdown widget — upcoming deadlines */
+  private createSidebarCountdown(): HTMLElement | null {
+    const countdowns = this.plugin.settings.countdowns;
+    if (!countdowns || countdowns.length === 0) return null;
+
+    const section = div('ax-sidebar-countdown');
+    const label = div('ax-sidebar-section-label');
+    label.textContent = '倒计时';
+    section.appendChild(label);
+
+    const list = div('ax-sidebar-cd-list');
+    const now = new Date();
+    countdowns.forEach(cd => {
+      const target = new Date(cd.target);
+      const diffMs = target.getTime() - now.getTime();
+      const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+      const item = div('ax-sidebar-cd-item');
+      const labelEl = div('ax-sidebar-cd-label');
+      labelEl.textContent = cd.label;
+      const daysEl = div('ax-sidebar-cd-days');
+      daysEl.innerHTML = String(Math.abs(diffDays)) + '<span class="ax-sidebar-cd-unit">' + (diffDays >= 0 ? '天' : '天前') + '</span>';
+      if (diffDays < 0) daysEl.style.color = 'var(--ax-rose)';
+      else if (diffDays <= 7) daysEl.style.color = 'var(--ax-amber)';
+      item.appendChild(labelEl);
+      item.appendChild(daysEl);
+      list.appendChild(item);
+    });
+    section.appendChild(list);
+    return section;
+  }
+
+  /** Sidebar Feeds — compact RSS feed list */
+  private createSidebarFeeds(): HTMLElement | null {
+    const section = div('ax-sidebar-feeds');
+    const label = div('ax-sidebar-section-label');
+    label.textContent = 'RSS 订阅';
+    section.appendChild(label);
+
+    // Show cached feed items if available
+    const cache = new FeedCache(this.app.vault);
+    cache.get<Array<{ title: string; source: string; time: string }>>('rss-feed').then(items => {
+      if (!items || items.length === 0) {
+        const emptyEl = div('ax-sidebar-feed-item');
+        const emptyTitle = div('ax-sidebar-feed-title');
+        emptyTitle.textContent = '暂无订阅内容';
+        emptyTitle.style.color = 'var(--ax-faint)';
+        emptyEl.appendChild(emptyTitle);
+        section.appendChild(emptyEl);
+        return;
+      }
+      items.slice(0, 5).forEach(item => {
+        const itemEl = div('ax-sidebar-feed-item');
+        const iconEl = div('ax-sidebar-feed-icon');
+        iconEl.textContent = '📡';
+        const titleEl = div('ax-sidebar-feed-title');
+        titleEl.textContent = item.title;
+        titleEl.title = item.title;
+        const timeEl = div('ax-sidebar-feed-time');
+        timeEl.textContent = item.time || '';
+        itemEl.appendChild(iconEl);
+        itemEl.appendChild(titleEl);
+        itemEl.appendChild(timeEl);
+        section.appendChild(itemEl);
+      });
+    }).catch(() => {
+      // Silently degrade — sidebar feeds are optional
+    });
+
     return section;
   }
 
@@ -823,6 +994,28 @@ export class DashboardView extends ItemView {
     return section;
   }
 
+  // ==================== Card Grid Span Configuration ====================
+
+  /**
+   * Returns the grid span configuration for a given card type.
+   * Format: { span: number, height: number } where:
+   *   span = column span (1 = normal, 2 = double-wide)
+   *   height = row span (1 = normal, 2 = double-tall)
+   */
+  private getCardSpan(cardId: string): { span: number; height: number } {
+    const spanMap: Record<string, { span: number; height: number }> = {
+      projects: { span: 2, height: 1 },   // 2x1 — active projects need more width
+      calendar: { span: 1, height: 2 },   // 1x2 — calendar needs vertical space
+      todos:    { span: 1, height: 1 },   // 1x1 default
+      feeds:    { span: 1, height: 1 },   // 1x1 default
+      recent:   { span: 1, height: 1 },   // 1x1 default
+      library:  { span: 1, height: 1 },   // 1x1 default
+      memo:     { span: 1, height: 1 },   // 1x1 default
+      lunar:    { span: 1, height: 1 },   // 1x1 default
+    };
+    return spanMap[cardId] || { span: 1, height: 1 };
+  }
+
   // ==================== Card Collapse + Drag/Drop ====================
 
   private getCardCollapseState(): CardCollapseState {
@@ -869,6 +1062,27 @@ export class DashboardView extends ItemView {
     const { section: shell, cards: contentArea } =
       this.createSectionScaffold('ax-section-' + cardId, title);
     shell.setAttribute('data-card-id', cardId);
+
+    // Apply grid span configuration
+    const spanConfig = this.getCardSpan(cardId);
+    if (spanConfig.span > 1) shell.setAttribute('data-span', String(spanConfig.span));
+    if (spanConfig.height > 1) shell.setAttribute('data-height', String(spanConfig.height));
+
+    // Card-level drag handle (visible on hover)
+    const cardDragHandle = div('ax-card-drag-handle');
+    cardDragHandle.innerHTML = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="5" cy="3" r="1"/><circle cx="11" cy="3" r="1"/><circle cx="5" cy="8" r="1"/><circle cx="11" cy="8" r="1"/><circle cx="5" cy="13" r="1"/><circle cx="11" cy="13" r="1"/></svg>';
+    cardDragHandle.title = '拖拽调整位置';
+    shell.appendChild(cardDragHandle);
+
+    // Card-level resize handle (visible on hover)
+    const cardResizeHandle = div('ax-card-resize-handle');
+    cardResizeHandle.title = '拖拽调整大小';
+    shell.appendChild(cardResizeHandle);
+
+    // Setup card-level drag
+    this.setupCardDrag(shell, cardDragHandle, cardId);
+    // Setup card-level resize
+    this.setupCardResize(shell, cardResizeHandle, cardId);
 
     // 内容区添加 lazy class
     contentArea.addClass('ax-card-lazy-content');
@@ -1078,6 +1292,89 @@ export class DashboardView extends ItemView {
     const settings = this.plugin.settings;
     const ui = settings.uiState as any;
     return ui?.sectionHeights?.[cardId] ?? null;
+  }
+
+  /** Card-level drag — reorders cards within the grid */
+  private setupCardDrag(
+    card: HTMLElement, handle: HTMLElement, cardId: string,
+  ): void {
+    handle.setAttribute('draggable', 'true');
+
+    this.regDom(handle, 'dragstart', (e) => {
+      card.addClass('ax-card--dragging');
+      if (e.dataTransfer) {
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', cardId);
+      }
+    });
+
+    this.regDom(handle, 'dragend', () => {
+      card.removeClass('ax-card--dragging');
+      document.querySelectorAll('.ax-card--drop-target')
+        .forEach(el => el.removeClass('ax-card--drop-target'));
+    });
+
+    // Use the card itself as drop target for card-level reorder
+    this.regDom(card, 'dragover', (e) => {
+      if (!card.hasClass('ax-card--dragging')) {
+        e.preventDefault();
+        if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+        card.addClass('ax-card--drop-target');
+      }
+    });
+
+    this.regDom(card, 'dragleave', () => {
+      card.removeClass('ax-card--drop-target');
+    });
+
+    this.regDom(card, 'drop', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      card.removeClass('ax-card--drop-target');
+      const fromId = e.dataTransfer?.getData('text/plain');
+      if (!fromId || fromId === cardId) return;
+      const order = this.getCardOrder();
+      const fromIdx = order.indexOf(fromId);
+      const toIdx = order.indexOf(cardId);
+      if (fromIdx === -1 || toIdx === -1 || fromIdx === toIdx) return;
+      const newOrder = [...order];
+      newOrder.splice(fromIdx, 1);
+      newOrder.splice(fromIdx < toIdx ? toIdx : toIdx, 0, fromId);
+      this.saveCardOrder(newOrder);
+      this.refresh();
+    });
+  }
+
+  /** Card-level resize — adjusts grid span dynamically */
+  private setupCardResize(
+    card: HTMLElement, handle: HTMLElement, cardId: string,
+  ): void {
+    let startX = 0;
+    let startWidth = 0;
+
+    const onMove = (e: MouseEvent) => {
+      const delta = e.clientX - startX;
+      const newWidth = Math.max(280, startWidth + delta);
+      card.style.minWidth = newWidth + 'px';
+    };
+
+    const onUp = () => {
+      card.removeClass('ax-card--resizing');
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      // Reset to let CSS grid handle sizing
+      card.style.minWidth = '';
+    };
+
+    this.regDom(handle, 'mousedown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      startX = e.clientX;
+      startWidth = card.offsetWidth;
+      card.addClass('ax-card--resizing');
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
   }
 
   // ==================== Banner (with integrated Focus + Daily Summary) ====================
