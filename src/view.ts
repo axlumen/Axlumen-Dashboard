@@ -573,6 +573,9 @@ export class DashboardView extends ItemView {
       // Initialize lazy renderer with grid as scroll root
       this.lazyRenderer = new LazyRenderer(grid);
 
+      // Setup grid-level drag-and-drop for reordering cards
+      this.setupGridDragAndDrop(grid);
+
       const order = this.getCardOrder();
       const FIRST_SCREEN_COUNT = 4;
       for (let i = 0; i < order.length; i++) {
@@ -1310,8 +1313,8 @@ export class DashboardView extends ItemView {
 
     this.regDom(handle, 'dragend', () => {
       card.removeClass('ax-card--dragging');
-      document.querySelectorAll('.ax-card--drop-target')
-        .forEach(el => el.removeClass('ax-card--drop-target'));
+      document.querySelectorAll('.ax-card--drop-target, .ax-card--drag-over')
+        .forEach(el => el.removeClass('ax-card--drop-target', 'ax-card--drag-over'));
     });
 
     // Use the card itself as drop target for card-level reorder
@@ -1319,30 +1322,207 @@ export class DashboardView extends ItemView {
       if (!card.hasClass('ax-card--dragging')) {
         e.preventDefault();
         if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+
+        // Determine drop position (before/after) based on mouse X position
+        const rect = card.getBoundingClientRect();
+        const midX = rect.left + rect.width / 2;
+        const pos = e.clientX < midX ? 'before' : 'after';
+        card.setAttribute('data-drop-pos', pos);
         card.addClass('ax-card--drop-target');
+        card.addClass('ax-card--drag-over');
       }
     });
 
     this.regDom(card, 'dragleave', () => {
-      card.removeClass('ax-card--drop-target');
+      card.removeClass('ax-card--drop-target', 'ax-card--drag-over');
+      card.removeAttribute('data-drop-pos');
     });
 
     this.regDom(card, 'drop', (e) => {
       e.preventDefault();
       e.stopPropagation();
-      card.removeClass('ax-card--drop-target');
+      card.removeClass('ax-card--drop-target', 'ax-card--drag-over');
+      card.removeAttribute('data-drop-pos');
       const fromId = e.dataTransfer?.getData('text/plain');
       if (!fromId || fromId === cardId) return;
       const order = this.getCardOrder();
       const fromIdx = order.indexOf(fromId);
       const toIdx = order.indexOf(cardId);
       if (fromIdx === -1 || toIdx === -1 || fromIdx === toIdx) return;
-      const newOrder = [...order];
-      newOrder.splice(fromIdx, 1);
-      newOrder.splice(fromIdx < toIdx ? toIdx : toIdx, 0, fromId);
+      const newOrder = order.filter(id => id !== fromId);
+      const dropPos = card.getAttribute('data-drop-pos') || 'after';
+      const insertIdx = newOrder.indexOf(cardId);
+      newOrder.splice(dropPos === 'after' ? insertIdx + 1 : insertIdx, 0, fromId);
       this.saveCardOrder(newOrder);
       this.refresh();
     });
+  }
+
+  /**
+   * Grid-level drag-and-drop — handles drops on the grid container
+   * (not on a specific card) to allow reordering via empty space.
+   * Also manages the visual placeholder element.
+   */
+  private setupGridDragAndDrop(grid: HTMLElement): void {
+    let placeholder: HTMLElement | null = null;
+    let draggedCardId: string | null = null;
+
+    this.regDom(grid, 'dragover', (e) => {
+      if (!e.dataTransfer) return;
+      const data = e.dataTransfer.types.includes('text/plain');
+      if (!data) return;
+
+      // Determine which card ID is being dragged
+      const types = e.dataTransfer.types;
+      if (!types.includes('text/plain')) return;
+
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+
+      // Find or create placeholder
+      if (!placeholder) {
+        placeholder = document.createElement('div');
+        placeholder.className = 'ax-card--placeholder';
+      }
+
+      // Find the card we're dragging over
+      const cards = Array.from(grid.querySelectorAll('.ax-section-row[data-card-id]')) as HTMLElement[];
+      const closest = this.getClosestCard(cards, e.clientX, e.clientY);
+
+      if (closest.card && closest.card !== placeholder) {
+        const rect = closest.card.getBoundingClientRect();
+        const midX = rect.left + rect.width / 2;
+        const insertBefore = e.clientX < midX;
+
+        // Determine the drag source card ID from the placeholder or dataTransfer
+        if (!draggedCardId) {
+          // Try to read from any currently dragging card
+          const draggingCard = grid.querySelector('.ax-card--dragging') as HTMLElement;
+          if (draggingCard) {
+            draggedCardId = draggingCard.getAttribute('data-card-id');
+          }
+        }
+
+        // Don't allow dropping on self
+        const targetId = closest.card.getAttribute('data-card-id');
+        if (targetId && draggedCardId && targetId === draggedCardId) {
+          if (placeholder.parentNode) placeholder.parentNode.removeChild(placeholder);
+          return;
+        }
+
+        // Apply span info to placeholder
+        if (closest.card.getAttribute('data-span')) {
+          placeholder.setAttribute('data-span', closest.card.getAttribute('data-span')!);
+        } else {
+          placeholder.removeAttribute('data-span');
+        }
+        if (closest.card.getAttribute('data-height')) {
+          placeholder.setAttribute('data-height', closest.card.getAttribute('data-height')!);
+        } else {
+          placeholder.removeAttribute('data-height');
+        }
+
+        // Position placeholder before or after the target card
+        if (insertBefore) {
+          grid.insertBefore(placeholder, closest.card);
+        } else {
+          grid.insertBefore(placeholder, closest.card.nextSibling);
+        }
+      }
+    });
+
+    this.regDom(grid, 'dragleave', (e) => {
+      // Only remove placeholder if actually leaving the grid
+      const related = e.relatedTarget as HTMLElement | null;
+      if (related && grid.contains(related)) return;
+      if (placeholder && placeholder.parentNode) {
+        placeholder.parentNode.removeChild(placeholder);
+      }
+      draggedCardId = null;
+    });
+
+    this.regDom(grid, 'drop', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      // Capture the dragged ID before cleanup
+      const fromId = draggedCardId;
+      if (placeholder && placeholder.parentNode) {
+        // Read the drop position from placeholder location
+        const allChildren = Array.from(grid.children).filter(
+          (el) => el !== placeholder && (el as HTMLElement).getAttribute('data-card-id'),
+        ) as HTMLElement[];
+        const placeholderIdx = Array.from(grid.children).indexOf(placeholder);
+
+        // Find the target card (the card at placeholder position)
+        let toId: string | null = null;
+        let insertAfter = false;
+        for (let i = 0; i < allChildren.length; i++) {
+          const childIdx = Array.from(grid.children).indexOf(allChildren[i]);
+          if (childIdx >= placeholderIdx) {
+            toId = allChildren[i].getAttribute('data-card-id');
+            insertAfter = false;
+            break;
+          }
+          if (i === allChildren.length - 1) {
+            toId = allChildren[i].getAttribute('data-card-id');
+            insertAfter = true;
+          }
+        }
+
+        placeholder.parentNode.removeChild(placeholder);
+
+        if (fromId && toId && fromId !== toId) {
+          const order = this.getCardOrder();
+          const fromIdx = order.indexOf(fromId);
+          const toIdx = order.indexOf(toId);
+          if (fromIdx !== -1 && toIdx !== -1) {
+            const newOrder = order.filter(id => id !== fromId);
+            const newToIdx = newOrder.indexOf(toId);
+            newOrder.splice(insertAfter ? newToIdx + 1 : newToIdx, 0, fromId);
+            this.saveCardOrder(newOrder);
+            this.refresh();
+          }
+        }
+      }
+      draggedCardId = null;
+    });
+
+    // Track which card is being dragged for grid-level awareness
+    this.regDom(grid, 'dragstart', (e) => {
+      const target = e.target as HTMLElement;
+      const card = target.closest('.ax-section-row[data-card-id]') as HTMLElement | null;
+      if (card) {
+        draggedCardId = card.getAttribute('data-card-id');
+      }
+    });
+
+    this.regDom(grid, 'dragend', () => {
+      if (placeholder && placeholder.parentNode) {
+        placeholder.parentNode.removeChild(placeholder);
+      }
+      draggedCardId = null;
+    });
+  }
+
+  /** Find the closest card to the mouse position in the grid */
+  private getClosestCard(
+    cards: HTMLElement[], x: number, y: number,
+  ): { card: HTMLElement | null; distance: number } {
+    let closest: HTMLElement | null = null;
+    let minDist = Infinity;
+
+    for (const card of cards) {
+      const rect = card.getBoundingClientRect();
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+      const dist = Math.hypot(x - cx, y - cy);
+      if (dist < minDist) {
+        minDist = dist;
+        closest = card;
+      }
+    }
+    return { card: closest, distance: minDist };
   }
 
   /** Card-level resize — adjusts grid span dynamically */

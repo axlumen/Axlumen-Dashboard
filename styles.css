@@ -1314,13 +1314,35 @@
 
 /* Old drag handle styles removed — using .ax-section-grip instead */
 
+/* Card drag states */
 .ax-card--dragging {
-  opacity: 0.4;
-  transform: rotate(2deg);
+  opacity: 0.35;
+  transform: scale(0.97) rotate(1deg);
   transition: none;
+  z-index: 100;
+  pointer-events: none;
+}
+.ax-card--drag-over {
+  box-shadow: inset 0 0 0 2px var(--ax-blue);
+  border-radius: var(--ax-radius-md);
+  transition: box-shadow 0.15s ease;
 }
 .ax-card--drop-target {
   border-top: 1px dashed var(--ax-blue) !important;
+}
+.ax-card--placeholder {
+  border: 2px dashed var(--ax-blue);
+  border-radius: var(--ax-radius-md);
+  background: var(--ax-blue-bg);
+  min-height: 60px;
+  opacity: 0.6;
+  transition: opacity 0.15s ease;
+}
+.ax-card--placeholder[data-span="2"] {
+  grid-column: span 2;
+}
+.ax-card--placeholder[data-height="2"] {
+  grid-row: span 2;
 }
 
 /* Collapsed — handled by .ax-section-row--collapsed in section styles above */
