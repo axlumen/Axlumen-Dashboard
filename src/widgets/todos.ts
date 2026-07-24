@@ -6,7 +6,7 @@
 import { App, TFile } from 'obsidian';
 import { TodoItem } from '../types';
 import { ParsedTask } from '../services/taskParser';
-import { el, div } from '../utils/dom';
+import { el, div, esc } from '../utils/dom';
 import { TODOS_FILE_PATH, TODOS_FILE_PATH_LEGACY, TODOS_DIR } from '../constants';
 import { type WidgetHandle, createRootedDisposable } from '../types';
 import { atomicWrite, safeRead } from '../utils/atomicWrite';
@@ -113,7 +113,7 @@ export async function createTodosPanel(
 
 /**
  * 一次性迁移：旧路径 → 新路径
- * 将 .axlumen-todos.json 迁移到 _axlumen/todos.json（YAML frontmatter 格式）
+ * 将 .gulldock-todos.json 迁移到 _gulldock/todos.json（YAML frontmatter 格式）
  */
 async function migrateTodosIfNeeded(app: App): Promise<void> {
   // 检查新路径是否已有文件
@@ -212,7 +212,7 @@ async function saveTodos(app: App, todos: TodoItem[]) {
       if (existing instanceof TFile) {
         await app.vault.modify(existing, content);
       } else {
-        // 确保 _axlumen 目录存在
+        // 确保 _gulldock 目录存在
         const dir = app.vault.getAbstractFileByPath(TODOS_DIR);
         if (!dir) {
           await app.vault.createFolder(TODOS_DIR);
@@ -495,6 +495,292 @@ async function addTodo(app: App, input: HTMLInputElement, section: HTMLElement) 
       const unified = unifyTasks(todos, parsed);
       renderTodoList(app, listEl, unified, progressEl, { registerCleanup: () => {}, safeTimeout: window.setTimeout.bind(window) });
       updateProgressHTML(progressEl, unified);
+    }
+  } finally {
+    busy = false;
+  }
+}
+
+// ==================== Todo Card (S7) ====================
+
+/**
+ * 创建 Todo 卡片组件（卡片类型系统 S7）
+ * 独立的卡片风格 Todo 组件，支持拖拽排序和进度条。
+ * 可嵌入 Dashboard 卡片网格。
+ */
+export async function createTodoCard(
+  app: App,
+  title?: string,
+): Promise<{ card: HTMLElement; handle: WidgetHandle }> {
+  const cleaners: Cleaner[] = [];
+  const timers: Set<number> = new Set();
+  const card = div('ax-todo-card');
+  if (title) {
+    const header = div('ax-todo-card-header');
+    header.innerHTML = `<h4 class="ax-todo-card-title">${esc(title)}</h4>`;
+    card.appendChild(header);
+  }
+
+  const registerCleanup = (fn: Cleaner) => { cleaners.push(fn); };
+  const safeTimeout = (fn: () => void, ms: number): number => {
+    const id = window.setTimeout(() => {
+      timers.delete(id);
+      fn();
+    }, ms);
+    timers.add(id);
+    return id;
+  };
+
+  // 加载任务
+  const manualTodos = await loadTodos(app);
+  const parsedTasks = await loadParsedTasks(app);
+  const tasks = unifyTasks(manualTodos, parsedTasks);
+
+  // 进度条
+  const progress = div('ax-todo-progress');
+  renderCardProgress(progress, tasks);
+  card.appendChild(progress);
+
+  // 输入行
+  const inputRow = div('ax-todo-input-row');
+  const input = el('input', {
+    type: 'text',
+    placeholder: '添加新任务...',
+    class: 'ax-todo-input',
+  }) as HTMLInputElement;
+  const addBtn = el('button', { class: 'ax-todo-add' }, '+');
+  const onAddClick = () => addTodoToCard(app, input, card, tasks);
+  const onInputKey = (e: KeyboardEvent) => { if (e.key === 'Enter') addTodoToCard(app, input, card, tasks); };
+  addBtn.addEventListener('click', onAddClick);
+  input.addEventListener('keydown', onInputKey);
+  registerCleanup(() => addBtn.removeEventListener('click', onAddClick));
+  registerCleanup(() => input.removeEventListener('keydown', onInputKey));
+  inputRow.appendChild(input);
+  inputRow.appendChild(addBtn);
+  card.appendChild(inputRow);
+
+  // 任务列表
+  const list = div('ax-todo-list');
+  card.appendChild(list);
+
+  renderCardTaskList(app, list, tasks, progress, { registerCleanup, safeTimeout });
+
+  const handle = createRootedDisposable([card], () => {
+    for (const id of timers) window.clearTimeout(id);
+    timers.clear();
+    for (const fn of cleaners) {
+      try { fn(); } catch { /* ignore */ }
+    }
+    card.empty();
+  });
+
+  return { card, handle };
+}
+
+/** 渲染卡片风格的进度条 */
+function renderCardProgress(progress: HTMLElement, tasks: UnifiedTask[]) {
+  const doneCount = tasks.filter(t => t.state === 'done').length;
+  const pct = tasks.length ? Math.round(doneCount / tasks.length * 100) : 0;
+  progress.innerHTML = `
+    <div class="ax-todo-stats ax-task-progress-bar">
+      <span class="ax-todo-count">${doneCount} / ${tasks.length}</span>
+      <span class="ax-todo-pct">${pct}%</span>
+    </div>
+    <div class="ax-bar"><i class="ax-todo-bar" style="width:${pct}%"></i></div>
+  `;
+}
+
+/** 更新卡片进度条 */
+function updateCardProgress(progressEl: HTMLElement, tasks: UnifiedTask[]) {
+  const doneCount = tasks.filter(t => t.state === 'done').length;
+  const pct = tasks.length ? Math.round(doneCount / tasks.length * 100) : 0;
+  const countEl = progressEl.querySelector('.ax-todo-count');
+  const pctEl = progressEl.querySelector('.ax-todo-pct');
+  const barEl = progressEl.querySelector('.ax-todo-bar') as HTMLElement;
+  if (countEl) countEl.textContent = `${doneCount} / ${tasks.length}`;
+  if (pctEl) pctEl.textContent = `${pct}%`;
+  if (barEl) barEl.style.width = `${pct}%`;
+}
+
+/** 卡片风格的任务列表渲染 */
+function renderCardTaskList(
+  app: App,
+  listEl: HTMLElement,
+  tasks: UnifiedTask[],
+  progressEl: HTMLElement,
+  hooks: RenderHooks,
+) {
+  listEl.empty();
+
+  tasks.forEach((task, i) => {
+    const item = div('ax-todo-item' +
+      (task.state === 'done' ? ' ax-todo-item--done' : '') +
+      (task.state === 'doing' ? ' ax-todo-item--doing' : ''));
+    item.setAttribute('draggable', 'true');
+    item.dataset.index = String(i);
+
+    // 拖拽手柄
+    const dragHandle = div('ax-todo-item-drag-handle');
+    dragHandle.innerHTML = '<svg viewBox="0 0 16 16" width="10" height="10" fill="currentColor"><circle cx="5" cy="3" r="1.2"/><circle cx="11" cy="3" r="1.2"/><circle cx="5" cy="8" r="1.2"/><circle cx="11" cy="8" r="1.2"/><circle cx="5" cy="13" r="1.2"/><circle cx="11" cy="13" r="1.2"/></svg>';
+    item.appendChild(dragHandle);
+
+    // 三态复选框
+    const check = el('span', { class: 'ax-todo-item-check' +
+      (task.state === 'done' ? ' ax-todo-item-check--done' : '') +
+      (task.state === 'doing' ? ' ax-todo-item-check--doing' : '')
+    });
+    const onCheckClick = async (e: MouseEvent) => {
+      e.stopPropagation();
+      await cycleCardTaskState(app, tasks, i, listEl, progressEl);
+    };
+    check.addEventListener('click', onCheckClick);
+    hooks.registerCleanup(() => check.removeEventListener('click', onCheckClick));
+    item.appendChild(check);
+
+    // 任务文本
+    const text = el('span', { class: 'ax-todo-item-text' }, task.text);
+    item.appendChild(text);
+
+    // 右侧 meta
+    const meta = div('ax-todo-item-meta');
+
+    // 日期
+    if (task.dueDate) {
+      const today = new Date().toISOString().slice(0, 10);
+      const isOverdue = task.dueDate < today && task.state !== 'done';
+      const dateTag = el('span', {
+        class: 'ax-todo-item-date' + (isOverdue ? ' ax-todo-item-date--overdue' : ''),
+      }, task.dueDate.slice(5));
+      meta.appendChild(dateTag);
+    }
+    item.appendChild(meta);
+
+    // 整行点击切换状态
+    const onItemClick = async () => {
+      await cycleCardTaskState(app, tasks, i, listEl, progressEl);
+    };
+    item.addEventListener('click', onItemClick);
+    hooks.registerCleanup(() => item.removeEventListener('click', onItemClick));
+
+    // 拖拽重排
+    setupCardDragReorder(item, tasks, i, app, listEl, progressEl, hooks);
+
+    listEl.appendChild(item);
+  });
+
+  if (tasks.length === 0) {
+    listEl.appendChild(div('ax-todo-card-empty', '暂无任务'));
+  }
+}
+
+/** 卡片风格的状态切换 */
+async function cycleCardTaskState(
+  app: App,
+  tasks: UnifiedTask[],
+  index: number,
+  listEl: HTMLElement,
+  progressEl: HTMLElement,
+) {
+  if (busy) return;
+  busy = true;
+  try {
+    const task = tasks[index];
+    if (task.source === 'manual') {
+      const manual = await loadTodos(app);
+      const target = manual.find(m => m.id === task.id);
+      if (target) {
+        target.state = nextState(task.state);
+        target.done = target.state === 'done';
+      }
+      await saveTodos(app, manual);
+    }
+    tasks[index].state = nextState(tasks[index].state);
+    renderCardTaskList(app, listEl, tasks, progressEl, { registerCleanup: () => {}, safeTimeout: window.setTimeout.bind(window) });
+    updateCardProgress(progressEl, tasks);
+  } finally {
+    busy = false;
+  }
+}
+
+/** 卡片风格的拖拽排序 */
+function setupCardDragReorder(
+  item: HTMLElement,
+  tasks: UnifiedTask[],
+  index: number,
+  app: App,
+  listEl: HTMLElement,
+  progressEl: HTMLElement,
+  hooks: RenderHooks,
+) {
+  const onDragStart = (e: DragEvent) => {
+    item.addClass('ax-todo-item--dragging');
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', String(index));
+    }
+  };
+  const onDragEnd = () => {
+    item.removeClass('ax-todo-item--dragging');
+    listEl.querySelectorAll('.ax-todo-item--drag-over').forEach(el => el.removeClass('ax-todo-item--drag-over'));
+  };
+  const onDragOver = (e: DragEvent) => {
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    item.addClass('ax-todo-item--drag-over');
+  };
+  const onDragLeave = () => {
+    item.removeClass('ax-todo-item--drag-over');
+  };
+  const onDrop = async (e: DragEvent) => {
+    e.preventDefault();
+    item.removeClass('ax-todo-item--drag-over');
+    const fromIdx = parseInt(e.dataTransfer?.getData('text/plain') || '-1', 10);
+    if (fromIdx < 0 || fromIdx === index) return;
+    const [moved] = tasks.splice(fromIdx, 1);
+    tasks.splice(index, 0, moved);
+    renderCardTaskList(app, listEl, tasks, progressEl, { registerCleanup: () => {}, safeTimeout: window.setTimeout.bind(window) });
+    updateCardProgress(progressEl, tasks);
+  };
+
+  item.addEventListener('dragstart', onDragStart);
+  item.addEventListener('dragend', onDragEnd);
+  item.addEventListener('dragover', onDragOver);
+  item.addEventListener('dragleave', onDragLeave);
+  item.addEventListener('drop', onDrop);
+
+  hooks.registerCleanup(() => {
+    item.removeEventListener('dragstart', onDragStart);
+    item.removeEventListener('dragend', onDragEnd);
+    item.removeEventListener('dragover', onDragOver);
+    item.removeEventListener('dragleave', onDragLeave);
+    item.removeEventListener('drop', onDrop);
+  });
+}
+
+/** 卡片风格添加任务 */
+async function addTodoToCard(
+  app: App,
+  input: HTMLInputElement,
+  card: HTMLElement,
+  tasks: UnifiedTask[],
+) {
+  const text = input.value.trim();
+  if (!text || busy) return;
+  busy = true;
+  try {
+    const todos = await loadTodos(app);
+    todos.push({ id: Date.now().toString(), text, tag: '', done: false, state: 'todo', createdAt: Date.now() });
+    await saveTodos(app, todos);
+    input.value = '';
+    const listEl = card.querySelector('.ax-todo-list') as HTMLElement;
+    const progressEl = card.querySelector('.ax-todo-progress') as HTMLElement;
+    if (listEl && progressEl) {
+      const parsed = await loadParsedTasks(app);
+      const unified = unifyTasks(todos, parsed);
+      tasks.length = 0;
+      tasks.push(...unified);
+      renderCardTaskList(app, listEl, unified, progressEl, { registerCleanup: () => {}, safeTimeout: window.setTimeout.bind(window) });
+      renderCardProgress(progressEl, unified);
     }
   } finally {
     busy = false;

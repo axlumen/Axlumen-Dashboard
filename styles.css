@@ -2235,6 +2235,165 @@
 }
 
 /* ========================================================================
+   TODO CARD — card-style todo component with drag-reorder + progress
+   ======================================================================== */
+
+.ax-todo-card {
+  background: var(--ax-surface);
+  border: 1px solid var(--ax-line);
+  border-radius: var(--ax-radius-m);
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  position: relative;
+  transition: border-color 200ms var(--ax-ease), box-shadow 0.15s var(--ax-ease);
+}
+.ax-todo-card:hover {
+  border-color: var(--ax-line-strong);
+  box-shadow: var(--ax-shadow-lift);
+}
+
+.ax-todo-card .ax-todo-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 320px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.ax-todo-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: var(--ax-radius-s);
+  transition: background 150ms var(--ax-ease), opacity 150ms var(--ax-ease);
+  cursor: pointer;
+  position: relative;
+}
+.ax-todo-item:hover {
+  background: var(--ax-surface-2);
+}
+.ax-todo-item.ax-todo-item--done .ax-todo-item-text {
+  text-decoration: line-through;
+  color: var(--ax-faint);
+}
+.ax-todo-item.ax-todo-item--doing .ax-todo-item-text {
+  color: var(--ax-accent);
+}
+
+.ax-todo-item-check {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  border-radius: 4px;
+  border: 1.5px solid var(--ax-faint);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 10px;
+  color: transparent;
+  transition: border-color 150ms var(--ax-ease), background-color 150ms var(--ax-ease);
+}
+.ax-todo-item-check:hover {
+  border-color: var(--ax-accent);
+}
+.ax-todo-item-check--doing {
+  border-color: var(--ax-accent);
+}
+.ax-todo-item-check--doing::after {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--ax-accent);
+}
+.ax-todo-item-check--done {
+  background: var(--ax-green);
+  border-color: var(--ax-green);
+}
+.ax-todo-item-check--done::after {
+  content: "\2713";
+  color: var(--ax-surface);
+  font-weight: 500;
+  font-size: 10px;
+}
+
+.ax-todo-item-text {
+  flex: 1;
+  font-size: 12px;
+  color: var(--ax-ink);
+  font-family: var(--ax-font-ui);
+  line-height: 1.4;
+}
+
+.ax-todo-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.ax-todo-item-date {
+  font-size: 10px;
+  color: var(--ax-faint);
+  font-family: var(--ax-font-data);
+}
+.ax-todo-item-date--overdue {
+  color: var(--ax-rose);
+  font-weight: 500;
+}
+
+.ax-todo-item-drag-handle {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  color: var(--ax-faint);
+  opacity: 0;
+  transition: opacity 150ms var(--ax-ease);
+  cursor: grab;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ax-todo-item:hover .ax-todo-item-drag-handle {
+  opacity: 1;
+}
+.ax-todo-item-drag-handle:active {
+  cursor: grabbing;
+}
+
+.ax-todo-item--dragging {
+  opacity: 0.35;
+}
+.ax-todo-item--drag-over {
+  border-top: 2px solid var(--ax-accent);
+}
+
+.ax-todo-card .ax-todo-progress {
+  margin-bottom: 0;
+}
+
+.ax-todo-card .ax-todo-input-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 0;
+}
+
+.ax-todo-card-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px;
+  color: var(--ax-faint);
+  font-size: 12px;
+  font-family: var(--ax-font-ui);
+}
+
+/* ========================================================================
    LAZY CARD SKELETON
    ======================================================================== */
 .ax-card--skeleton .ax-card-lazy-content {
