@@ -11,8 +11,8 @@
  *   [7] Sidebar trimmed: duplicate Action Bar removed
  */
 
-import { ItemView, WorkspaceLeaf, Events } from 'obsidian';
-import type AxlumenDashboardPlugin from './main';
+import { ItemView, WorkspaceLeaf, Events, TFile } from 'obsidian';
+import type GullDockPlugin from './main';
 import { scanVault, getRecentFiles } from './scanner';
 import type {
   VaultStats, QuickAction, FocusProject, CardCollapseState,
@@ -26,20 +26,19 @@ import {
   CLOCK_INTERVAL_MS, TOAST_DURATION_MS,
   AUTO_REFRESH_DEBOUNCE_MS, MS_PER_DAY,
 } from './constants';
-import { buildIngestPrompt, buildQueryPrompt } from './prompts';
 import { createTodosPanel } from './widgets/todos';
-import { createCountdownPanel } from './widgets/countdown';
-import { createHeatmapPanel } from './widgets/heatmap';
+import { createLibraryPanel } from './widgets/library';
+import { createCalendarPanel } from './widgets/calendar';
+import { createMemoPanel } from './widgets/memo';
+import { createLunarWidget } from './widgets/lunar';
 import {
   createInboxPanel, scanInbox, buildInboxIngestPrompt, InboxItem,
 } from './widgets/inbox';
-import { createWeekCalendarWidget } from './widgets/weekCalendar';
 import { createAgentStatusWidget } from './widgets/agentStatus';
 import { createFeedsPanel } from './widgets/feeds';
 import { createWorkflowsPanel, RulesStore } from './widgets/workflows';
-import { createActiveTaskBar } from './widgets/activeTaskBar';
-import { createVaultHealthPanel } from './widgets/vaultHealth';
 import { createInboxRouterPanel } from './widgets/inboxRouter';
+import { renderBanner, resolveVaultImage, BannerEditModal } from './banner';
 import { AgentRunner } from './agent/AgentRunner';
 import { enqueueAgentTask, AgentTaskType } from './agent/claudeCode';
 import { addTask, completeTask, failTask, getTasksByStatus, listRecentTasks } from './agent/taskStore';
@@ -49,6 +48,8 @@ import { CompositeDisposable } from './utils/CompositeDisposable';
 import { LazyRenderer } from './utils/LazyRenderer';
 import { renderErrorState } from './utils/ServiceResult';
 import type { WidgetHandle, Disposable } from './types';
+import { PomodoroService } from './services/PomodoroService';
+import { fetchWeather, weatherCodeToEmoji, weatherCodeToDescription } from './services/WeatherService';
 
 /* ========================================================================
    SVG Icon System — inline stroke-path SVGs (currentColor, 1.5)
@@ -77,13 +78,13 @@ function icon(name: string, size = 14): string {
 
 // v2.1 — 'workflows' removed from CARD_IDS (rendered in Sidebar only)
 const CARD_IDS = [
-  'kpi', 'todos', 'heatmap', 'vaultHealth', 'feeds', 'projects', 'recent',
+  'todos', 'feeds', 'projects', 'recent', 'library', 'calendar', 'memo', 'lunar',
 ];
 
-export const VIEW_TYPE_DASHBOARD = 'axlumen-dashboard-view';
+export const VIEW_TYPE_DASHBOARD = 'gulldock-view';
 
 export class DashboardView extends ItemView {
-  plugin: AxlumenDashboardPlugin;
+  plugin: GullDockPlugin;
   private stats: VaultStats | null = null;
   private clockInterval: number | null = null;
   private currentPage: string = 'overview';
@@ -120,15 +121,11 @@ export class DashboardView extends ItemView {
 
   // Sidebar / Banner state
   private sidebarPinned = false;
-  private sidebarExpanded = false;
+  private sidebarExpanded = true;
   private bannerCollapsed = false;
 
   // Agent Runner (shared singleton)
   private agentRunner: AgentRunner | null = null;
-
-  // v2.1: handles for active workflows and live subscribers
-  // activeTaskBarHandle is created once per render; tracked for runner unsubscriptions
-  private activeTaskBarHandle: Disposable | null = null;
 
   /**
    * CompositeDisposable — manages view-scoped resources:
@@ -160,11 +157,14 @@ export class DashboardView extends ItemView {
   private static readonly QUOTE_ROTATION_MS = 60_000;
   private quoteRotationTimer: number | null = null;
 
+  // Image rotation
+  private bannerImageIndex = 0;
+  private static readonly IMAGE_ROTATION_MS = 30 * 60_000; // 30 minutes
+  private imageRotationTimer: number | null = null;
+
   // Page definitions
   private readonly pages = [
     { id: 'overview', icon: 'grid', label: '总览' },
-    { id: 'vault', icon: 'map', label: '全库视图' },
-    { id: 'graph', icon: 'graph', label: '知识图谱' },
   ];
 
   // Lazy renderer for Kanban cards
@@ -173,20 +173,20 @@ export class DashboardView extends ItemView {
   // DOM event cleanup tracking
   private _domCleanup: Array<() => void> = [];
 
-  constructor(leaf: WorkspaceLeaf, plugin: AxlumenDashboardPlugin) {
+  constructor(leaf: WorkspaceLeaf, plugin: GullDockPlugin) {
     super(leaf);
     this.plugin = plugin;
   }
 
   getViewType() { return VIEW_TYPE_DASHBOARD; }
-  getDisplayText() { return 'Axlumen Dashboard'; }
+  getDisplayText() { return 'GullDock'; }
   getIcon() { return 'layout-dashboard'; }
 
   // ==================== Lifecycle ====================
 
   async onOpen() {
     this.containerEl.empty();
-    this.containerEl.addClass('axlumen-dashboard');
+    this.containerEl.addClass('gulldock-root');
 
     // Reset composite (onOpen can be called multiple times after close)
     this.composite = new CompositeDisposable();
@@ -245,8 +245,6 @@ export class DashboardView extends ItemView {
     this.automationEngine = null;
     this.unregisterVaultEvents();
     this.cleanupDomEvents();
-    // Clear the active task bar DOM (the handle was already disposed via composite)
-    this.activeTaskBarHandle = null;
     // Final DOM wipe
     this.containerEl.empty();
   }
@@ -276,9 +274,34 @@ export class DashboardView extends ItemView {
     if (!this.plugin.settings.autoRefresh) return;
     const vault = this.app.vault;
     this.vaultEvents = vault;
-    this.registerEvent(vault.on('modify', this.handleVaultChange));
-    this.registerEvent(vault.on('create', this.handleVaultChange));
-    this.registerEvent(vault.on('delete', this.handleVaultChange));
+
+    // 监听 modify 事件：只响应 .md 文件修改
+    this.registerEvent(vault.on('modify', (file) => {
+      if (file instanceof TFile && file.extension === 'md') {
+        this.handleVaultChange();
+      }
+    }));
+
+    // 监听 create 事件：只响应 .md 文件创建
+    this.registerEvent(vault.on('create', (file) => {
+      if (file instanceof TFile && file.extension === 'md') {
+        this.handleVaultChange();
+      }
+    }));
+
+    // 监听 delete 事件：只响应 .md 文件删除
+    this.registerEvent(vault.on('delete', (file) => {
+      if (file instanceof TFile && file.extension === 'md') {
+        this.handleVaultChange();
+      }
+    }));
+
+    // 监听 rename 事件：文件重命名/移动
+    this.registerEvent(vault.on('rename', (file, oldPath) => {
+      if (file instanceof TFile && file.extension === 'md') {
+        this.handleVaultChange();
+      }
+    }));
   }
 
   private unregisterVaultEvents() { this.vaultEvents = null; }
@@ -354,7 +377,7 @@ export class DashboardView extends ItemView {
       }),
     );
     this.focusProjects = settingProjects.length > 0 ? settingProjects : [
-      { name: 'Axlumen Dashboard', path: 'projects/axlumen-dashboard', stage: 'Phase 1', nextAction: '完成 Dashboard 改造' },
+      { name: 'GullDock', path: 'projects/gulldock', stage: 'Phase 1', nextAction: '完成 Dashboard 改造' },
       { name: '知识库重构', path: 'projects/knowledge-restructure', stage: '规划阶段', nextAction: '确定 Wiki 分类体系' },
       { name: '安全审计工具', path: 'projects/security-audit', stage: '调研阶段', nextAction: '评估工具链' },
     ];
@@ -367,27 +390,101 @@ export class DashboardView extends ItemView {
 
   private initQuickActions() {
     const cmds: Array<Omit<QuickAction, 'id'>> = [
-      { name: 'New Diary', type: 'file', target: 'diary/new', icon: '📝' },
-      { name: 'Deep Research', type: 'command', target: 'editor:open', icon: '🔬' },
-      { name: 'Pull RSS', type: 'command', target: 'rss:sync', icon: '📡' },
-      { name: 'GitHub Feeds', type: 'command', target: 'github:refresh', icon: '⭐' },
-      { name: 'Inbox Ingest', type: 'command', target: 'inbox:archive', icon: '📥' },
-      { name: 'Vault Lint', type: 'command', target: 'vault:health', icon: '🏥' },
+      { name: 'New Diary', type: 'command', target: 'new-diary', icon: '📝' },
+      { name: 'Deep Research', type: 'command', target: 'deep-research', icon: '🔬' },
+      { name: 'Pull RSS', type: 'command', target: 'pull-rss', icon: '📡' },
+      { name: 'GitHub Feeds', type: 'command', target: 'github-feeds', icon: '⭐' },
+      { name: 'Inbox Ingest', type: 'command', target: 'inbox-ingest', icon: '📥' },
+      { name: 'Vault Lint', type: 'command', target: 'vault-lint', icon: '🏥' },
     ];
     this.quickActions = cmds.map((c, i) => ({ ...c, id: 'qa-' + i }));
   }
 
   private executeQuickAction(qa: QuickAction) {
-    if (qa.type === 'file') {
-      this.openPath(qa.target);
+    switch (qa.target) {
+      case 'new-diary':
+        this.executeNewDiary();
+        break;
+      case 'deep-research':
+        this.executeDeepResearch();
+        break;
+      case 'pull-rss':
+        this.executePullRss();
+        break;
+      case 'github-feeds':
+        this.executeGithubFeeds();
+        break;
+      case 'inbox-ingest':
+        this.executeInboxIngest();
+        break;
+      case 'vault-lint':
+        this.executeVaultLint();
+        break;
+      default:
+        this.showToast('未知操作: ' + qa.name);
+    }
+  }
+
+  private executeNewDiary() {
+    const today = window.moment().format('YYYY-MM-DD');
+    const dailyDir = 'diary';
+    const path = `${dailyDir}/${today}.md`;
+    const existing = this.app.vault.getAbstractFileByPath(path);
+    if (existing) {
+      this.openPath(path);
+      this.showToast('日记已存在，已打开');
     } else {
-      const cmd = this.app.commands.commands?.[qa.target];
-      if (cmd) {
-        try { this.app.commands.executeCommandById(qa.target); }
-        catch { this.showToast('执行命令失败: ' + qa.name); }
-      } else {
-        this.showToast('Command: ' + qa.name + ' (mock — wire up in settings)');
-      }
+      const content = `---\ncreated: ${today}\ntags: [daily]\n---\n\n# ${today}\n\n## Tasks\n\n## Notes\n`;
+      void this.app.vault.create(path, content).then(() => {
+        this.openPath(path);
+        this.showToast('已创建今日日记');
+      }).catch(() => {
+        // 确保目录存在
+        void this.app.vault.createFolder(dailyDir).then(() => {
+          void this.app.vault.create(path, content).then(() => {
+            this.openPath(path);
+            this.showToast('已创建今日日记');
+          });
+        }).catch(() => this.showToast('创建日记失败'));
+      });
+    }
+  }
+
+  private executeDeepResearch() {
+    if (this.plugin.agentRunner) {
+      void this.plugin.agentRunner.run('deep-research-single', { topic: 'AI Agent 最新趋势' });
+      this.showToast('已启动深度调研');
+    } else {
+      this.showToast('Agent Runner 未初始化');
+    }
+  }
+
+  private executePullRss() {
+    // 触发 Feed 刷新
+    document.dispatchEvent(new CustomEvent('gulldock-feed-refresh'));
+    this.showToast('正在刷新 RSS...');
+  }
+
+  private executeGithubFeeds() {
+    document.dispatchEvent(new CustomEvent('gulldock-feed-refresh', { detail: { source: 'github' } }));
+    this.showToast('正在刷新 GitHub Feeds...');
+  }
+
+  private executeInboxIngest() {
+    if (this.plugin.agentRunner) {
+      void this.plugin.agentRunner.run('inbox-auto-routing');
+      this.showToast('已启动 Inbox 自动路由');
+    } else {
+      this.showToast('Agent Runner 未初始化');
+    }
+  }
+
+  private executeVaultLint() {
+    if (this.plugin.agentRunner) {
+      void this.plugin.agentRunner.run('vault-lint-full-scan');
+      this.showToast('已启动 Vault 健康检查');
+    } else {
+      this.showToast('Agent Runner 未初始化');
     }
   }
 
@@ -441,7 +538,7 @@ export class DashboardView extends ItemView {
       const app = div('ax-app');
       app.addClass('apex-dashboard-root');
       app.setAttribute('data-theme', settings.theme);
-      app.addClass('axlumen-theme-' + settings.theme);
+      app.addClass('gulldock-theme-' + settings.theme);
 
       // v2.1 [1] — Banner with integrated compact focus
       this.initFocusData();
@@ -464,13 +561,14 @@ export class DashboardView extends ItemView {
       // ---- Kanban Content ----
       const content = div('ax-kanban-wrapper');
 
-      // Overview page (Kanban)
+      // Overview page (Grid)
       const pageOverview = div('ax-page');
       pageOverview.setAttribute('data-page', 'overview');
-      const kanban = div('ax-kanban');
+      const grid = div('ax-grid');
+      grid.setAttribute('data-page', 'overview');
 
-      // Initialize lazy renderer with kanban as scroll root
-      this.lazyRenderer = new LazyRenderer(kanban);
+      // Initialize lazy renderer with grid as scroll root
+      this.lazyRenderer = new LazyRenderer(grid);
 
       const order = this.getCardOrder();
       const FIRST_SCREEN_COUNT = 4;
@@ -479,7 +577,7 @@ export class DashboardView extends ItemView {
         try {
           const card = this.createCardById(cardId);
           if (card) {
-            kanban.appendChild(card);
+            grid.appendChild(card);
             // Force render first N cards (首屏)
             if (i < FIRST_SCREEN_COUNT) {
               const contentEl = card.querySelector('.ax-card-lazy-content') as HTMLElement;
@@ -488,15 +586,15 @@ export class DashboardView extends ItemView {
           }
         } catch (e) {
           console.error('[DASHBOARD]', 'WIDGET_RENDER_FAILED', cardId, e);
-          kanban.appendChild(renderErrorState({
+          grid.appendChild(renderErrorState({
             code: 'WIDGET_RENDER_FAILED',
             message: cardId + ' 加载失败',
             recoverable: false,
           }));
         }
       }
-      kanban.appendChild(this.createFooter());
-      pageOverview.appendChild(kanban);
+      pageOverview.appendChild(grid);
+      pageOverview.appendChild(this.createFooter());
       content.appendChild(pageOverview);
 
       // Vault page
@@ -523,6 +621,7 @@ export class DashboardView extends ItemView {
       this.startClock();
       this.setupSidebarBehavior(sidebar, slimIndicator);
       this.setupQuoteRotation();
+      this.setupImageRotation();
       this.refreshBanner();
 
       // Entrance animations
@@ -548,52 +647,36 @@ export class DashboardView extends ItemView {
     const scroll = div('ax-sidebar-scroll');
     const widgets = this.plugin.settings.widgets;
 
-    // 1. v2.1 [2] — Compact Quick Actions (top of sidebar, replaces old Action Bar)
+    // 1. Tab navigation (page switching — essential)
+    scroll.appendChild(this.createSidebarNav());
+    scroll.appendChild(div('ax-sidebar-divider'));
+
+    // 2. Quick Actions (top actions — essential)
     this.initQuickActions();
     scroll.appendChild(this.createSidebarQuickActions());
     scroll.appendChild(div('ax-sidebar-divider'));
 
-    // 2. v2.1 [3] — Active Task Bar (moved into sidebar)
-    try {
-      const { bar, handle: activeTaskBarHandle } = createActiveTaskBar(
-        this.plugin.agentRunner, (path) => this.openPath(path),
-      );
-      this.activeTaskBarHandle = activeTaskBarHandle;
-      this.composite.add(activeTaskBarHandle);
-      scroll.appendChild(bar);
-    } catch (e) {
-      console.error('[DASHBOARD]', 'TASK_BAR_FAILED', e);
-      scroll.appendChild(renderErrorState({
-        code: 'TASK_BAR_FAILED', message: '任务栏加载失败', recoverable: false,
-      }));
-    }
-    scroll.appendChild(div('ax-sidebar-divider'));
-
-    // 3. KPI compact bar
-    scroll.appendChild(this.createSidebarKpiBar());
-    scroll.appendChild(div('ax-sidebar-divider'));
-
-    // 4. Tab navigation
-    scroll.appendChild(this.createSidebarNav());
-    scroll.appendChild(div('ax-sidebar-divider'));
-
-    // 5. Week Calendar (height-limited)
-    if (widgets.weekCalendar) {
+    // 2.5 Pomodoro (if enabled)
+    if (this.plugin.settings.pomodoroEnabled) {
       try {
-        const { section: cal, handle: calHandle } = createWeekCalendarWidget(
-          this.app, this.createPanelSection.bind(this),
-        );
-        cal.style.maxHeight = '140px';
-        cal.style.overflow = 'hidden';
-        scroll.appendChild(cal);
-        this.composite.add(calHandle);
+        scroll.appendChild(this.createSidebarPomodoro());
+        scroll.appendChild(div('ax-sidebar-divider'));
       } catch (e) {
-        console.error('[DASHBOARD]', 'WEEK_CALENDAR_FAILED', e);
+        console.error('[DASHBOARD]', 'POMODORO_FAILED', e);
       }
-      scroll.appendChild(div('ax-sidebar-divider'));
     }
 
-    // 6. v2.1 [4][6] — Agent & Workflows combined (no duplicate)
+    // 2.6 Weather (if enabled)
+    if (this.plugin.settings.widgetWeatherEnabled) {
+      try {
+        scroll.appendChild(await this.createSidebarWeather());
+        scroll.appendChild(div('ax-sidebar-divider'));
+      } catch (e) {
+        console.error('[DASHBOARD]', 'WEATHER_FAILED', e);
+      }
+    }
+
+    // 3. Agent & Workflows (core feature)
     try {
       scroll.appendChild(await this.createCombinedAgentPanel());
     } catch (e) {
@@ -604,7 +687,7 @@ export class DashboardView extends ItemView {
     }
     scroll.appendChild(div('ax-sidebar-divider'));
 
-    // 7. Inbox Router (uses cached vaultHealthData — no extra scan)
+    // 4. Inbox Router (uses cached vaultHealthData — no extra scan)
     try {
       const inboxFiles = this.vaultHealthData?.inboxFiles ?? [];
       const { section: irSection, handle: irHandle } = createInboxRouterPanel(
@@ -621,26 +704,6 @@ export class DashboardView extends ItemView {
       this.composite.add(irHandle);
     } catch (e) {
       console.error('[DASHBOARD]', 'INBOX_ROUTER_FAILED', e);
-    }
-    scroll.appendChild(div('ax-sidebar-divider'));
-
-    // 8. Countdown
-    try {
-      const { section: cdSection, handle: cdHandle } = createCountdownPanel(
-        this.plugin.settings,
-        () => this.plugin.saveSettings(),
-        (msg: string) => this.showToast(msg),
-        this.createPanelSection.bind(this),
-      );
-      scroll.appendChild(cdSection);
-    } catch (e) {
-      console.error('[DASHBOARD]', 'COUNTDOWN_FAILED', e);
-    }
-    scroll.appendChild(div('ax-sidebar-divider'));
-
-    // 9. Quick Memo
-    if (widgets.quickMemo) {
-      scroll.appendChild(this.createQuickMemoWidget());
     }
 
     sidebar.appendChild(scroll);
@@ -790,11 +853,13 @@ export class DashboardView extends ItemView {
     const TITLES: Record<string, string> = {
       kpi: '性能指标',
       todos: '今日待办',
-      heatmap: '写作热力图',
-      vaultHealth: 'Vault Health Overview',
       feeds: '信息流',
       projects: '活跃项目',
       recent: '最近编辑',
+      library: 'Vault 文件库',
+      calendar: '任务日历',
+      memo: '快速笔记',
+      lunar: '农历今日',
     };
 
     const title = TITLES[cardId];
@@ -813,13 +878,14 @@ export class DashboardView extends ItemView {
       try {
         let inner: HTMLElement | null = null;
         switch (cardId) {
-          case 'kpi':        inner = this.createKpiContent(); break;
           case 'todos':      inner = this.createTodosContent(); break;
-          case 'heatmap':    inner = this.createHeatmapContent(); break;
-          case 'vaultHealth': inner = this.createVaultHealthContent(); break;
           case 'feeds':      inner = this.createFeedsContent(); break;
           case 'projects':   inner = this.createProjectsContent(); break;
           case 'recent':     inner = this.createRecentFilesContent(); break;
+          case 'library':    inner = this.createLibraryContent(); break;
+          case 'calendar':   inner = this.createCalendarContent(); break;
+          case 'memo':       inner = this.createMemoContent(); break;
+          case 'lunar':      inner = this.createLunarContent(); break;
         }
         if (inner) {
           contentArea.appendChild(inner);
@@ -867,103 +933,151 @@ export class DashboardView extends ItemView {
     const collapseState = this.getCardCollapseState();
     const isCollapsed = collapseState[cardId] || false;
 
-    const header =
-      (card.querySelector('.ax-section-header') as HTMLElement)
-      || card.querySelector('.ax-section-title') as HTMLElement;
+    const header = card.querySelector('.ax-section-header') as HTMLElement;
     if (!header) return;
 
-    if (isCollapsed) card.addClass('ax-card--collapsed');
+    if (isCollapsed) card.addClass('ax-section-row--collapsed');
 
-    // Drag handle
-    const dragHandle = div('ax-card-drag-handle');
-    dragHandle.innerHTML = '<span class="ax-drag-grip"></span>';
-    dragHandle.title = '拖拽排序';
-    card.insertBefore(dragHandle, card.firstChild);
+    // Restore saved section height
+    const savedHeight = this.getSectionHeight(cardId);
+    if (savedHeight) card.style.maxHeight = savedHeight + 'px';
 
-    // Collapse button
-    const collapseBtn = el('button', {
-      class: 'ax-card-collapse-btn',
-      type: 'button',
-      title: isCollapsed ? '展开' : '折叠',
-    });
-    collapseBtn.innerHTML = isCollapsed ? '▸' : '▾';
+    // Section-level collapse via toggle button
+    const toggleBtn = card.querySelector('.ax-section-toggle') as HTMLElement;
+    if (toggleBtn) {
+      this.regDom(toggleBtn, 'click', (e) => {
+        e.stopPropagation();
+        const collapsed = card.hasClass('ax-section-row--collapsed');
+        card.toggleClass('ax-section-row--collapsed', !collapsed);
+        const state = this.getCardCollapseState();
+        state[cardId] = !collapsed;
+        this.saveCardCollapseState(state);
 
-    const actions = header.querySelector('.ax-section-header-actions') as HTMLElement;
-    if (actions) actions.appendChild(collapseBtn);
-    else header.appendChild(collapseBtn);
-
-    this.regDom(collapseBtn, 'click', (e) => {
-      e.stopPropagation();
-      const collapsed = card.hasClass('ax-card--collapsed');
-      card.toggleClass('ax-card--collapsed', !collapsed);
-      collapseBtn.innerHTML = collapsed ? '▾' : '▸';
-      collapseBtn.title = collapsed ? '折叠' : '展开';
-      const state = this.getCardCollapseState();
-      state[cardId] = !collapsed;
-      this.saveCardCollapseState(state);
-
-      // 折叠/展开时处理懒渲染注册
-      if (contentArea && renderFn && this.lazyRenderer) {
-        if (!collapsed) {
-          // 展开：注册懒渲染，用 setTimeout(0) 不阻塞主线程
-          setTimeout(() => {
-            this.lazyRenderer!.register(contentArea, renderFn);
-            card.removeClass('ax-card--skeleton');
-          }, 0);
-        } else {
-          // 折叠：取消懒渲染注册
-          this.lazyRenderer.unregister(contentArea);
+        // Handle lazy rendering on expand/collapse
+        if (contentArea && renderFn && this.lazyRenderer) {
+          if (!collapsed) {
+            setTimeout(() => {
+              this.lazyRenderer!.register(contentArea, renderFn);
+              card.removeClass('ax-card--skeleton');
+            }, 0);
+          } else {
+            this.lazyRenderer.unregister(contentArea);
+          }
         }
-      }
-    });
+      });
+    }
 
-    this.setupCardDragAndDrop(card, dragHandle, cardId);
+    // Section-level drag via grip handle
+    const grip = card.querySelector('.ax-section-grip') as HTMLElement;
+    if (grip) {
+      this.setupSectionDragAndDrop(card, grip, cardId);
+    }
+
+    // Section resize handle
+    const resizeHandle = card.querySelector('.ax-section-resize-handle') as HTMLElement;
+    if (resizeHandle) {
+      this.setupSectionResize(card, resizeHandle, cardId);
+    }
   }
 
-  private setupCardDragAndDrop(
-    card: HTMLElement, handle: HTMLElement, cardId: string,
+  private setupSectionDragAndDrop(
+    section: HTMLElement, grip: HTMLElement, cardId: string,
   ): void {
-    handle.setAttribute('draggable', 'true');
+    grip.setAttribute('draggable', 'true');
 
-    this.regDom(handle, 'dragstart', (e) => {
-      card.addClass('ax-card--dragging');
+    this.regDom(grip, 'dragstart', (e) => {
+      section.addClass('ax-section-row--dragging');
       if (e.dataTransfer) {
         e.dataTransfer.effectAllowed = 'move';
         e.dataTransfer.setData('text/plain', cardId);
       }
     });
 
-    this.regDom(handle, 'dragend', () => {
-      card.removeClass('ax-card--dragging');
-      card.parentElement?.querySelectorAll('.ax-card--drop-target')
-        .forEach(el => el.removeClass('ax-card--drop-target'));
+    this.regDom(grip, 'dragend', () => {
+      section.removeClass('ax-section-row--dragging');
+      document.querySelectorAll('.ax-section-row--section-drag-over')
+        .forEach(el => el.removeClass('ax-section-row--section-drag-over'));
     });
 
-    this.regDom(card, 'dragover', (e) => {
-      if (!card.hasClass('ax-card--dragging')) {
+    this.regDom(section, 'dragover', (e) => {
+      if (!section.hasClass('ax-section-row--dragging')) {
         e.preventDefault();
-        card.addClass('ax-card--drop-target');
+        const rect = section.getBoundingClientRect();
+        const midY = rect.top + rect.height / 2;
+        const pos = e.clientY < midY ? 'before' : 'after';
+        section.setAttribute('data-section-drop-pos', pos);
+        section.addClass('ax-section-row--section-drag-over');
       }
     });
 
-    this.regDom(card, 'dragleave', () => {
-      card.removeClass('ax-card--drop-target');
+    this.regDom(section, 'dragleave', () => {
+      section.removeClass('ax-section-row--section-drag-over');
     });
 
-    this.regDom(card, 'drop', (e) => {
+    this.regDom(section, 'drop', (e) => {
       e.preventDefault();
-      card.removeClass('ax-card--drop-target');
+      section.removeClass('ax-section-row--section-drag-over');
       const fromId = e.dataTransfer?.getData('text/plain');
       if (!fromId || fromId === cardId) return;
       const order = this.getCardOrder();
       const fromIdx = order.indexOf(fromId);
       const toIdx = order.indexOf(cardId);
-      if (fromIdx < 0 || toIdx < 0) return;
-      order.splice(fromIdx, 1);
-      order.splice(toIdx, 0, fromId);
-      this.saveCardOrder(order);
+      if (fromIdx === -1 || toIdx === -1 || fromIdx === toIdx) return;
+      const newOrder = [...order];
+      newOrder.splice(fromIdx, 1);
+      const dropPos = section.getAttribute('data-section-drop-pos') || 'after';
+      const insertIdx = dropPos === 'before' ? toIdx : toIdx;
+      newOrder.splice(fromIdx < toIdx ? insertIdx : insertIdx, 0, fromId);
+      this.saveCardOrder(newOrder);
       this.refresh();
     });
+  }
+
+  private setupSectionResize(
+    section: HTMLElement, handle: HTMLElement, cardId: string,
+  ): void {
+    let startY = 0;
+    let startHeight = 0;
+
+    const onMove = (e: MouseEvent) => {
+      const delta = e.clientY - startY;
+      section.style.maxHeight = Math.max(200, startHeight + delta) + 'px';
+    };
+
+    const onUp = (e: MouseEvent) => {
+      section.removeClass('ax-section-row--resizing');
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      const finalHeight = parseInt(section.style.maxHeight) || 500;
+      this.saveSectionHeight(cardId, finalHeight);
+    };
+
+    this.regDom(handle, 'mousedown', (e) => {
+      e.preventDefault();
+      startY = e.clientY;
+      startHeight = section.offsetHeight;
+      section.addClass('ax-section-row--resizing');
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+  }
+
+  private saveSectionHeight(cardId: string, height: number): void {
+    const collapse = LocalStore.getCardCollapse();
+    // Store section heights alongside collapse state using a convention
+    // We'll use the plugin settings directly for persistence
+    const settings = this.plugin.settings;
+    if (!settings.uiState) settings.uiState = {} as any;
+    const ui = settings.uiState as any;
+    if (!ui.sectionHeights) ui.sectionHeights = {};
+    ui.sectionHeights[cardId] = height;
+    void this.plugin.saveSettings();
+  }
+
+  private getSectionHeight(cardId: string): number | null {
+    const settings = this.plugin.settings;
+    const ui = settings.uiState as any;
+    return ui?.sectionHeights?.[cardId] ?? null;
   }
 
   // ==================== Banner (with integrated Focus + Daily Summary) ====================
@@ -971,14 +1085,23 @@ export class DashboardView extends ItemView {
   /** v2.2 — Banner: Brand + Focus + Daily Summary + Status Indicator */
   private createBanner(): HTMLElement {
     const settings = this.plugin.settings;
-    const bannerMode = settings.banner?.bannerMode || 'detailed';
+    const bannerConfig = settings.banner || {};
+    const bannerMode = bannerConfig.bannerMode || 'detailed';
     const banner = div('ax-banner');
     if (this.bannerCollapsed) banner.addClass('ax-banner--collapsed');
     if (bannerMode === 'compact') banner.addClass('ax-banner--compact');
 
-    // Gradient background
-    const bgLayer = div('ax-banner-bg');
-    banner.appendChild(bgLayer);
+    // Background image support
+    const activeImage = bannerConfig.images && bannerConfig.images.length > 0
+      ? bannerConfig.images[0]
+      : bannerConfig.backgroundImage;
+    if (activeImage) {
+      const resolved = resolveVaultImage(this.app, activeImage);
+      if (resolved) {
+        banner.style.backgroundImage = `url("${resolved}")`;
+        banner.addClass('ax-banner--has-image');
+      }
+    }
 
     const overlay = div('ax-banner-overlay');
 
@@ -1010,6 +1133,9 @@ export class DashboardView extends ItemView {
     this.bannerLiveEl = this.createStatusIndicator();
     topRow.appendChild(this.bannerLiveEl);
 
+    // Theme toggle
+    topRow.appendChild(this.createThemeToggle());
+
     overlay.appendChild(topRow);
 
     // ---- Summary section (detailed mode only) ----
@@ -1019,8 +1145,8 @@ export class DashboardView extends ItemView {
     }
 
     // ---- Quote section (only if enabled) ----
-    if (settings.banner?.enableQuoteRotation) {
-      const quotes = settings.quotes;
+    if (bannerConfig.enableQuoteRotation) {
+      const quotes = bannerConfig.quotes || settings.quotes;
       if (quotes && quotes.length > 0) {
         this.bannerQuoteIndex = 0;
         const quoteSection = div('ax-banner-quote-section');
@@ -1055,6 +1181,28 @@ export class DashboardView extends ItemView {
     const live = div('ax-banner-live');
     this.updateBannerStatus();
     return live;
+  }
+
+  /** Theme toggle button — cycles Island ↔ Nordic */
+  private createThemeToggle(): HTMLElement {
+    const btn = el('button', {
+      class: 'ax-banner-theme-toggle',
+      type: 'button',
+      title: '切换主题',
+    });
+    const current = this.plugin.settings.theme;
+    btn.innerHTML = current === 'island' ? '🏝️' : '❄️';
+    btn.setAttribute('data-theme-current', current);
+
+    this.regDom(btn, 'click', () => {
+      const next = this.plugin.settings.theme === 'island' ? 'nordic' : 'island';
+      this.plugin.settings.theme = next;
+      void this.plugin.saveSettings();
+      // Re-render to apply new theme
+      this.refresh();
+    });
+
+    return btn;
   }
 
   /** Update status indicator color based on data */
@@ -1287,7 +1435,7 @@ export class DashboardView extends ItemView {
     }
     // Respect setting: only rotate if enabled
     if (!this.plugin.settings.banner?.enableQuoteRotation) return;
-    const quotes = this.plugin.settings.quotes;
+    const quotes = this.plugin.settings.banner?.quotes || this.plugin.settings.quotes;
     if (quotes.length <= 1) return;
     const quoteEl = this.containerEl.querySelector('.ax-banner-quote');
     const authorEl = this.containerEl.querySelector('.ax-banner-author');
@@ -1305,6 +1453,29 @@ export class DashboardView extends ItemView {
         authorEl.removeClass('ax-banner-author--fading');
       }, 300);
     }, DashboardView.QUOTE_ROTATION_MS));
+  }
+
+  private setupImageRotation() {
+    if (this.imageRotationTimer) {
+      window.clearInterval(this.imageRotationTimer);
+      this.imageRotationTimer = null;
+    }
+    const images = this.plugin.settings.banner?.images;
+    if (!images || images.length <= 1) return;
+
+    this.imageRotationTimer = this.registerInterval(window.setInterval(() => {
+      this.bannerImageIndex = (this.bannerImageIndex + 1) % images.length;
+      const next = images[this.bannerImageIndex];
+      const resolved = resolveVaultImage(this.app, next);
+      if (!resolved) return;
+      const bannerEl = this.containerEl.querySelector('.ax-banner') as HTMLElement;
+      if (!bannerEl) return;
+      bannerEl.addClass('ax-banner--image-fading');
+      window.setTimeout(() => {
+        bannerEl.style.backgroundImage = `url("${resolved}")`;
+        bannerEl.removeClass('ax-banner--image-fading');
+      }, 400);
+    }, DashboardView.IMAGE_ROTATION_MS));
   }
 
   // ==================== Sidebar Components ====================
@@ -1327,57 +1498,6 @@ export class DashboardView extends ItemView {
     };
   }
 
-  /** Sidebar KPI compact bar */
-  private createSidebarKpiBar(): HTMLElement {
-    const { healthClass, healthText, inboxSub, taskSub, notesSub } = this.kpiSubTexts;
-
-    const bar = div('ax-sidebar-kpi-bar');
-    bar.innerHTML =
-      '<div class="ax-sidebar-kpi-row">' +
-        '<b data-count="' + (this.stats?.totalNotes || 0) + '">0</b>' +
-        '<span>Notes</span>' +
-        '<small class="ax-kpi-neutral">' + esc(notesSub) + '</small>' +
-      '</div>' +
-      '<div class="ax-sidebar-kpi-row">' +
-        '<b data-count="' + this.inboxCount + '">0</b>' +
-        '<span>Inbox</span>' +
-        '<small class="' + (this.inboxCount > 0 ? 'ax-kpi-down' : 'ax-kpi-up') + '">' +
-          esc(inboxSub) +
-        '</small>' +
-      '</div>' +
-      '<div class="ax-sidebar-kpi-row">' +
-        '<b data-count="' + this.taskCompletionPct + '" data-suffix="%">0</b>' +
-        '<span>Task</span>' +
-        '<small class="ax-kpi-neutral">' + esc(taskSub) + '</small>' +
-      '</div>' +
-      '<div class="ax-sidebar-kpi-row">' +
-        '<b data-count="' + this.worstHealthScore + '" data-suffix="%">0</b>' +
-        '<span>Health</span>' +
-        '<small class="' + healthClass + '">' + esc(healthText) + '</small>' +
-      '</div>' +
-      '<div class="ax-sidebar-sync">' +
-        '<span class="ax-sync-label">SYNC</span>' +
-        '<span class="ax-sync-time">' + esc(this.lastSyncTime || '--:--') + '</span>' +
-      '</div>';
-
-    const refreshBtn = el('button', { class: 'ax-sidebar-refresh', type: 'button' });
-    refreshBtn.innerHTML = '<span class="ax-refresh-icon"></span>';
-    refreshBtn.title = '手动全量刷新';
-    this.regDom(refreshBtn, 'click', () => {
-      refreshBtn.addClass('is-loading');
-      setTimeout(() => { this.refresh(); refreshBtn.removeClass('is-loading'); }, 600);
-    });
-    bar.appendChild(refreshBtn);
-
-    requestAnimationFrame(() => {
-      bar.querySelectorAll<HTMLElement>('[data-count]').forEach(b => {
-        animateCount(b, parseInt(b.dataset.count || '0'), 900, b.dataset.suffix || '');
-      });
-    });
-
-    return bar;
-  }
-
   /** Sidebar tab navigation */
   private createSidebarNav(): HTMLElement {
     const nav = div('ax-sidebar-nav');
@@ -1394,6 +1514,167 @@ export class DashboardView extends ItemView {
       nav.appendChild(item);
     });
     return nav;
+  }
+
+  // ==================== Sidebar Widgets (Pomodoro, Weather) ====================
+
+  /** Sidebar Pomodoro widget — circular progress ring + timer */
+  private createSidebarPomodoro(): HTMLElement {
+    const panel = div('ax-panel ax-pomodoro-panel');
+    const header = div('ax-panel-header');
+    header.innerHTML = '<h4 class="ax-panel-title">🍅 番茄钟</h4>';
+    panel.appendChild(header);
+
+    const content = div('ax-pomodoro-content');
+
+    // Ring container
+    const ringWrap = div('ax-pomodoro-ring-wrap');
+    const ring = div('ax-pomodoro-ring');
+    ring.style.setProperty('--progress', '0');
+    const ringInner = div('ax-pomodoro-ring-inner');
+    const timerText = div('ax-pomodoro-timer');
+    timerText.textContent = '25:00';
+    const phaseText = div('ax-pomodoro-phase');
+    phaseText.textContent = '工作';
+    ringInner.appendChild(timerText);
+    ringInner.appendChild(phaseText);
+    ring.appendChild(ringInner);
+    ringWrap.appendChild(ring);
+    content.appendChild(ringWrap);
+
+    // Controls
+    const controls = div('ax-pomodoro-controls');
+    const startBtn = el('button', { class: 'ax-pomodoro-btn ax-pomodoro-btn-start', type: 'button' }, '▶');
+    const pauseBtn = el('button', { class: 'ax-pomodoro-btn ax-pomodoro-btn-pause', type: 'button' }, '⏸');
+    const resetBtn = el('button', { class: 'ax-pomodoro-btn ax-pomodoro-btn-reset', type: 'button' }, '⏹');
+    const skipBtn = el('button', { class: 'ax-pomodoro-btn ax-pomodoro-btn-skip', type: 'button' }, '⏭');
+    pauseBtn.style.display = 'none';
+    controls.appendChild(startBtn);
+    controls.appendChild(pauseBtn);
+    controls.appendChild(resetBtn);
+    controls.appendChild(skipBtn);
+    content.appendChild(controls);
+
+    // Today count
+    const countEl = div('ax-pomodoro-count');
+    countEl.textContent = '今日 0 个';
+    content.appendChild(countEl);
+
+    panel.appendChild(content);
+
+    // Initialize pomodoro service
+    const pomodoro = new PomodoroService(() => this.plugin.settings);
+    void pomodoro.loadSessions();
+
+    const updateUI = () => {
+      const state = pomodoro.getState();
+      const mins = Math.floor(state.remainingSeconds / 60);
+      const secs = state.remainingSeconds % 60;
+      timerText.textContent = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+
+      const progress = state.totalSeconds > 0
+        ? ((state.totalSeconds - state.remainingSeconds) / state.totalSeconds) * 100
+        : 0;
+      ring.style.setProperty('--progress', String(progress));
+
+      const phaseLabels: Record<string, string> = { 'work': '工作', 'short-break': '短休息', 'long-break': '长休息' };
+      phaseText.textContent = phaseLabels[state.phase] || state.phase;
+
+      startBtn.style.display = state.status === 'running' ? 'none' : '';
+      pauseBtn.style.display = state.status === 'running' ? '' : 'none';
+
+      countEl.textContent = `今日 ${pomodoro.getTodayCount()} 个`;
+    };
+
+    pomodoro.setOnTick(updateUI);
+    pomodoro.setOnComplete(updateUI);
+
+    this.regDom(startBtn, 'click', () => { pomodoro.start(); updateUI(); });
+    this.regDom(pauseBtn, 'click', () => { pomodoro.pause(); updateUI(); });
+    this.regDom(resetBtn, 'click', () => { pomodoro.reset(); updateUI(); });
+    this.regDom(skipBtn, 'click', () => { pomodoro.skip(); updateUI(); });
+
+    this.composite.add({ dispose: () => pomodoro.destroy(), disposed: false, roots: [] });
+
+    return panel;
+  }
+
+  /** Sidebar Weather widget — current temp + forecast */
+  private async createSidebarWeather(): Promise<HTMLElement> {
+    const panel = div('ax-panel ax-weather-panel');
+    const header = div('ax-panel-header');
+    header.innerHTML = '<h4 class="ax-panel-title">🌤️ 天气</h4>';
+    panel.appendChild(header);
+
+    const content = div('ax-weather-content');
+
+    // Loading skeleton
+    const skeleton = div('ax-skeleton');
+    skeleton.innerHTML =
+      '<div class="ax-skeleton-text" style="width:60%"></div>' +
+      '<div class="ax-skeleton-text--short ax-skeleton-text"></div>';
+    skeleton.style.padding = '12px';
+    content.appendChild(skeleton);
+
+    panel.appendChild(content);
+
+    const renderWeather = async () => {
+      content.empty();
+
+      // Offline check
+      if (!navigator.onLine) {
+        const offlineBadge = div('ax-offline-badge');
+        offlineBadge.textContent = '📡 离线模式';
+        content.appendChild(offlineBadge);
+        return;
+      }
+
+      try {
+        const config = {
+          latitude: this.plugin.settings.widgetWeatherLat ?? 31.23,
+          longitude: this.plugin.settings.widgetWeatherLon ?? 121.47,
+          cityName: this.plugin.settings.widgetWeatherCity ?? 'Shanghai',
+        };
+
+        const data = await fetchWeather(config);
+
+        // Current weather
+        const current = div('ax-weather-current');
+        const emoji = weatherCodeToEmoji(data.weatherCode);
+        const desc = weatherCodeToDescription(data.weatherCode);
+        current.innerHTML =
+          `<span class="ax-weather-emoji">${emoji}</span>` +
+          `<span class="ax-weather-temp">${Math.round(data.temperature)}°C</span>` +
+          `<span class="ax-weather-desc">${desc}</span>`;
+        content.appendChild(current);
+
+        // Details
+        const details = div('ax-weather-details');
+        details.innerHTML =
+          `<span>体感 ${Math.round(data.feelsLike)}°</span>` +
+          `<span>湿度 ${data.humidity}%</span>` +
+          `<span>风速 ${Math.round(data.windSpeed)} km/h</span>`;
+        content.appendChild(details);
+
+        // City name
+        const cityEl = div('ax-weather-city');
+        cityEl.textContent = config.cityName;
+        content.appendChild(cityEl);
+
+      } catch (e) {
+        const errorEl = div('ax-weather-error');
+        errorEl.textContent = '天气加载失败';
+        content.appendChild(errorEl);
+
+        // Retry button
+        const retryBtn = el('button', { class: 'ax-retry-btn', type: 'button' }, '⟳ 重试');
+        this.regDom(retryBtn, 'click', () => renderWeather());
+        content.appendChild(retryBtn);
+      }
+    };
+
+    await renderWeather();
+    return panel;
   }
 
   /** Sidebar hover-expand + outside-click-collapse behaviour */
@@ -1422,94 +1703,6 @@ export class DashboardView extends ItemView {
 
   // ==================== Kanban Sections ====================
 
-  /** KPI Hero Section */
-  private createKpiSection(): HTMLElement {
-    const sectionEl = div('ax-section-row ax-section-kpi');
-
-    const hdc = this.healthDelta > 0 ? 'ax-kpi-up'
-      : this.healthDelta < 0 ? 'ax-kpi-down' : 'ax-kpi-neutral';
-    const hdt = this.healthDelta
-      ? (this.healthDelta > 0 ? '+' : '') + this.healthDelta + ' this week'
-      : 'no change';
-    const isub = this.inboxCount > 0 ? this.oldestInboxDays + 'd oldest' : 'all clear';
-    const tsub = this.tasksToday + ' today'
-      + (this.tasksOverdue > 0 ? ', ' + this.tasksOverdue + ' overdue' : '');
-    const nsub = this.notesThisMonth > 0 ? '+' + this.notesThisMonth + ' this month' : '—';
-
-    const header = div('ax-section-header');
-    header.innerHTML =
-      '<div class="ax-section-title-wrap">' +
-        '<h3 class="ax-section-title">性能指标</h3>' +
-      '</div>' +
-      '<div class="ax-section-header-actions">' +
-        '<span class="ax-live"><i></i>LIVE</span>' +
-        '<button class="ax-section-refresh-btn" title="刷新">' +
-          '<span class="ax-refresh-icon"></span>' +
-        '</button>' +
-      '</div>';
-    sectionEl.appendChild(header);
-
-    const kpiGrid = div('ax-kpi-grid');
-    kpiGrid.innerHTML =
-      '<div class="ax-kpi-card">' +
-        '<b data-count="' + (this.stats?.totalNotes || 0) + '">0</b>' +
-        '<span class="ax-kpi-label">Notes</span>' +
-        '<small class="ax-kpi-sub ax-kpi-neutral">' + esc(nsub) + '</small>' +
-      '</div>' +
-      '<div class="ax-kpi-card">' +
-        '<b data-count="' + (this.stats?.totalConcepts || 0) + '">0</b>' +
-        '<span class="ax-kpi-label">Concepts</span>' +
-        '<small class="ax-kpi-sub ax-kpi-neutral">wiki pages</small>' +
-      '</div>' +
-      '<div class="ax-kpi-card">' +
-        '<b data-count="' + this.inboxCount + '">0</b>' +
-        '<span class="ax-kpi-label">Inbox</span>' +
-        '<small class="ax-kpi-sub ' + (this.inboxCount > 0 ? 'ax-kpi-down' : 'ax-kpi-up') + '">' +
-          esc(isub) +
-        '</small>' +
-      '</div>' +
-      '<div class="ax-kpi-card">' +
-        '<b data-count="' + this.taskCompletionPct + '" data-suffix="%">0</b>' +
-        '<span class="ax-kpi-label">Task Flow</span>' +
-        '<small class="ax-kpi-sub ax-kpi-neutral">' + esc(tsub) + '</small>' +
-      '</div>' +
-      '<div class="ax-kpi-card">' +
-        '<b data-count="' + this.worstHealthScore + '" data-suffix="%">0</b>' +
-        '<span class="ax-kpi-label">Health</span>' +
-        '<small class="ax-kpi-sub ' + hdc + '">' + esc(hdt) + '</small>' +
-      '</div>';
-    sectionEl.appendChild(kpiGrid);
-
-    const clockRow = div('ax-kpi-clock-row');
-    clockRow.innerHTML =
-      '<div class="ax-clock-compact">' +
-        '<span class="ax-clock-time" id="ax-time">00<em>:</em>00</span>' +
-        '<span class="ax-clock-date" id="ax-date"></span>' +
-      '</div>' +
-      '<div class="ax-header-sync">' +
-        '<span class="ax-sync-label">Last sync</span>' +
-        '<span class="ax-sync-time">' + esc(this.lastSyncTime || '--:--') + '</span>' +
-      '</div>';
-    sectionEl.appendChild(clockRow);
-
-    requestAnimationFrame(() => {
-      kpiGrid.querySelectorAll<HTMLElement>('[data-count]').forEach(b => {
-        animateCount(b, parseInt(b.dataset.count || '0'), 1100, b.dataset.suffix || '');
-      });
-    });
-
-    const kpiRefreshBtn = header.querySelector('.ax-section-refresh-btn');
-    if (kpiRefreshBtn) {
-      const btn = kpiRefreshBtn as HTMLElement;
-      this.regDom(btn, 'click', () => {
-        btn.addClass('is-loading');
-        setTimeout(() => { this.refresh(); }, 600);
-      });
-    }
-
-    return sectionEl;
-  }
-
   /** Todos Section */
   private createTodosSectionSync(): HTMLElement {
     const { section: sectionEl, cards: cardsContainer } =
@@ -1522,32 +1715,6 @@ export class DashboardView extends ItemView {
       }
       if (todos.handle) this.composite.add(todos.handle);
     });
-    return sectionEl;
-  }
-
-  /** Heatmap Section */
-  private createHeatmapSectionSync(): HTMLElement {
-    const { section: sectionEl, cards: cardsContainer } =
-      this.createSectionScaffold('ax-section-heatmap', '写作热力图');
-    const { section: hmSection, handle: hmHandle } =
-      createHeatmapPanel(this.app, this.createPanelSection.bind(this), this.vaultHealthData);
-    cardsContainer.appendChild(hmSection);
-    this.composite.add(hmHandle);
-    sectionEl.appendChild(cardsContainer);
-    return sectionEl;
-  }
-
-  /** Vault Health Section */
-  private createVaultHealthSection(): HTMLElement {
-    const { section: sectionEl, cards: cardsContainer } =
-      this.createSectionScaffold('ax-section-vault-health', 'Vault Health Overview');
-    cardsContainer.addClass('ax-vh-cards-container');
-    if (!this.vaultScanner) this.vaultScanner = new VaultScanner(this.app);
-    const { section: panel, handle: vhHandle } =
-      createVaultHealthPanel(this.app, this.createPanelSection.bind(this));
-    cardsContainer.appendChild(panel);
-    this.composite.add(vhHandle);
-    sectionEl.appendChild(cardsContainer);
     return sectionEl;
   }
 
@@ -1589,71 +1756,6 @@ export class DashboardView extends ItemView {
   // Used by createCardById for lazy rendering.
 
   /** KPI content (grid + clock) — lazy */
-  private createKpiContent(): HTMLElement {
-    const container = div('ax-kpi-lazy-content');
-
-    const hdc = this.healthDelta > 0 ? 'ax-kpi-up'
-      : this.healthDelta < 0 ? 'ax-kpi-down' : 'ax-kpi-neutral';
-    const hdt = this.healthDelta
-      ? (this.healthDelta > 0 ? '+' : '') + this.healthDelta + ' this week'
-      : 'no change';
-    const isub = this.inboxCount > 0 ? this.oldestInboxDays + 'd oldest' : 'all clear';
-    const tsub = this.tasksToday + ' today'
-      + (this.tasksOverdue > 0 ? ', ' + this.tasksOverdue + ' overdue' : '');
-    const nsub = this.notesThisMonth > 0 ? '+' + this.notesThisMonth + ' this month' : '—';
-
-    const kpiGrid = div('ax-kpi-grid');
-    kpiGrid.innerHTML =
-      '<div class="ax-kpi-card">' +
-        '<b data-count="' + (this.stats?.totalNotes || 0) + '">0</b>' +
-        '<span class="ax-kpi-label">Notes</span>' +
-        '<small class="ax-kpi-sub ax-kpi-neutral">' + esc(nsub) + '</small>' +
-      '</div>' +
-      '<div class="ax-kpi-card">' +
-        '<b data-count="' + (this.stats?.totalConcepts || 0) + '">0</b>' +
-        '<span class="ax-kpi-label">Concepts</span>' +
-        '<small class="ax-kpi-sub ax-kpi-neutral">wiki pages</small>' +
-      '</div>' +
-      '<div class="ax-kpi-card">' +
-        '<b data-count="' + this.inboxCount + '">0</b>' +
-        '<span class="ax-kpi-label">Inbox</span>' +
-        '<small class="ax-kpi-sub ' + (this.inboxCount > 0 ? 'ax-kpi-down' : 'ax-kpi-up') + '">' +
-          esc(isub) +
-        '</small>' +
-      '</div>' +
-      '<div class="ax-kpi-card">' +
-        '<b data-count="' + this.taskCompletionPct + '" data-suffix="%">0</b>' +
-        '<span class="ax-kpi-label">Task Flow</span>' +
-        '<small class="ax-kpi-sub ax-kpi-neutral">' + esc(tsub) + '</small>' +
-      '</div>' +
-      '<div class="ax-kpi-card">' +
-        '<b data-count="' + this.worstHealthScore + '" data-suffix="%">0</b>' +
-        '<span class="ax-kpi-label">Health</span>' +
-        '<small class="ax-kpi-sub ' + hdc + '">' + esc(hdt) + '</small>' +
-      '</div>';
-    container.appendChild(kpiGrid);
-
-    const clockRow = div('ax-kpi-clock-row');
-    clockRow.innerHTML =
-      '<div class="ax-clock-compact">' +
-        '<span class="ax-clock-time" id="ax-time-lazy">00<em>:</em>00</span>' +
-        '<span class="ax-clock-date" id="ax-date-lazy"></span>' +
-      '</div>' +
-      '<div class="ax-header-sync">' +
-        '<span class="ax-sync-label">Last sync</span>' +
-        '<span class="ax-sync-time">' + esc(this.lastSyncTime || '--:--') + '</span>' +
-      '</div>';
-    container.appendChild(clockRow);
-
-    requestAnimationFrame(() => {
-      kpiGrid.querySelectorAll<HTMLElement>('[data-count]').forEach(b => {
-        animateCount(b, parseInt(b.dataset.count || '0'), 1100, b.dataset.suffix || '');
-      });
-    });
-
-    return container;
-  }
-
   /** Todos content — lazy */
   private createTodosContent(): HTMLElement {
     const container = div('ax-todos-lazy-content');
@@ -1665,28 +1767,6 @@ export class DashboardView extends ItemView {
       }
       if (todos.handle) this.composite.add(todos.handle);
     });
-    return container;
-  }
-
-  /** Heatmap content — lazy, Canvas-based */
-  private createHeatmapContent(): HTMLElement {
-    const container = div('ax-heatmap-lazy-content');
-    const { section: hmSection, handle: hmHandle } =
-      createHeatmapPanel(this.app, this.createPanelSection.bind(this), this.vaultHealthData);
-    container.appendChild(hmSection);
-    this.composite.add(hmHandle);
-    return container;
-  }
-
-  /** Vault Health content — lazy */
-  private createVaultHealthContent(): HTMLElement {
-    const container = div('ax-vh-lazy-content');
-    container.addClass('ax-vh-cards-container');
-    if (!this.vaultScanner) this.vaultScanner = new VaultScanner(this.app);
-    const { section: panel, handle: vhHandle } =
-      createVaultHealthPanel(this.app, this.createPanelSection.bind(this));
-    container.appendChild(panel);
-    this.composite.add(vhHandle);
     return container;
   }
 
@@ -1739,6 +1819,46 @@ export class DashboardView extends ItemView {
       list.appendChild(item);
     });
     container.appendChild(list);
+    return container;
+  }
+
+  /** Library content — lazy */
+  private createLibraryContent(): HTMLElement {
+    const container = div('ax-library-lazy-content');
+    const { section: libSection, handle: libHandle } =
+      createLibraryPanel(this.app, this.createPanelSection.bind(this));
+    container.appendChild(libSection);
+    this.composite.add(libHandle);
+    return container;
+  }
+
+  /** Calendar content — lazy */
+  private createCalendarContent(): HTMLElement {
+    const container = div('ax-calendar-lazy-content');
+    const { section: calSection, handle: calHandle } =
+      createCalendarPanel(this.app, this.createPanelSection.bind(this));
+    container.appendChild(calSection);
+    this.composite.add(calHandle);
+    return container;
+  }
+
+  /** Memo content — lazy */
+  private createMemoContent(): HTMLElement {
+    const container = div('ax-memo-lazy-content');
+    const { section: memoSection, handle: memoHandle } =
+      createMemoPanel(this.app, this.createPanelSection.bind(this));
+    container.appendChild(memoSection);
+    this.composite.add(memoHandle);
+    return container;
+  }
+
+  /** Lunar content — lazy */
+  private createLunarContent(): HTMLElement {
+    const container = div('ax-lunar-lazy-content');
+    const { section: lunarSection, handle: lunarHandle } =
+      createLunarWidget();
+    container.appendChild(lunarSection);
+    this.composite.add(lunarHandle);
     return container;
   }
 
@@ -1841,18 +1961,34 @@ export class DashboardView extends ItemView {
 
   /** Create a section row with header and content area */
   private createSectionScaffold(
-    className: string, title: string,
+    className: string, title: string, sectionType?: string,
   ): { section: HTMLElement; cards: HTMLElement } {
     const section = div('ax-section-row ' + className);
+    if (sectionType) section.setAttribute('data-section-type', sectionType);
+
+    // Grip handle for section reorder (desktop only)
+    const grip = div('ax-section-grip');
+    grip.innerHTML = '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="5" cy="3" r="1"/><circle cx="11" cy="3" r="1"/><circle cx="5" cy="8" r="1"/><circle cx="11" cy="8" r="1"/><circle cx="5" cy="13" r="1"/><circle cx="11" cy="13" r="1"/></svg>';
+    section.appendChild(grip);
+
+    // Header with toggle + title + actions
     const header = div('ax-section-header');
     header.innerHTML =
       '<div class="ax-section-title-wrap">' +
+        '<button class="ax-section-toggle"></button>' +
         '<h3 class="ax-section-title">' + esc(title) + '</h3>' +
       '</div>' +
       '<div class="ax-section-header-actions"></div>';
     section.appendChild(header);
+
+    // Cards container
     const cards = div('ax-section-cards');
     section.appendChild(cards);
+
+    // Resize handle (bottom)
+    const resizeHandle = div('ax-section-resize-handle');
+    section.appendChild(resizeHandle);
+
     return { section, cards };
   }
 
@@ -1870,8 +2006,59 @@ export class DashboardView extends ItemView {
 
   private createFooter(): HTMLElement {
     const footer = div('ax-footer');
+    const { healthClass, healthText, inboxSub, taskSub, notesSub } = this.kpiSubTexts;
+
     footer.innerHTML =
-      '<span class="ax-footer-text">Axlumen Dashboard · Agent-First Vault Intelligence</span>';
+      '<div class="ax-footer-left">' +
+        '<span class="ax-footer-brand">GullDock</span>' +
+        '<span class="ax-footer-sep">·</span>' +
+        '<span class="ax-footer-kpi">' +
+          '<span class="ax-footer-kpi-item">' +
+            '<b data-count="' + (this.stats?.totalNotes || 0) + '">0</b>' +
+            '<span>Notes</span>' +
+            '<small>' + esc(notesSub) + '</small>' +
+          '</span>' +
+          '<span class="ax-footer-kpi-item">' +
+            '<b data-count="' + this.inboxCount + '">0</b>' +
+            '<span>Inbox</span>' +
+            '<small class="' + (this.inboxCount > 0 ? 'ax-kpi-down' : 'ax-kpi-up') + '">' +
+              esc(inboxSub) +
+            '</small>' +
+          '</span>' +
+          '<span class="ax-footer-kpi-item">' +
+            '<b data-count="' + this.taskCompletionPct + '" data-suffix="%">0</b>' +
+            '<span>Task</span>' +
+            '<small>' + esc(taskSub) + '</small>' +
+          '</span>' +
+          '<span class="ax-footer-kpi-item">' +
+            '<b data-count="' + this.worstHealthScore + '" data-suffix="%">0</b>' +
+            '<span>Health</span>' +
+            '<small class="' + healthClass + '">' + esc(healthText) + '</small>' +
+          '</span>' +
+        '</span>' +
+      '</div>' +
+      '<div class="ax-footer-right">' +
+        '<span class="ax-footer-sync">' +
+          '<span class="ax-sync-label">SYNC</span>' +
+          '<span class="ax-sync-time">' + esc(this.lastSyncTime || '--:--') + '</span>' +
+        '</span>' +
+        '<button class="ax-footer-refresh" title="手动刷新">⟳</button>' +
+      '</div>';
+
+    const refreshBtn = footer.querySelector('.ax-footer-refresh') as HTMLElement;
+    if (refreshBtn) {
+      this.regDom(refreshBtn, 'click', () => {
+        refreshBtn.addClass('is-loading');
+        setTimeout(() => { this.refresh(); refreshBtn.removeClass('is-loading'); }, 600);
+      });
+    }
+
+    requestAnimationFrame(() => {
+      footer.querySelectorAll<HTMLElement>('[data-count]').forEach(b => {
+        animateCount(b, parseInt(b.dataset.count || '0'), 900, b.dataset.suffix || '');
+      });
+    });
+
     return footer;
   }
 
