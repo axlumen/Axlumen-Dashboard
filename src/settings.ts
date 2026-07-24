@@ -3,12 +3,12 @@
  */
 
 import { App, PluginSettingTab, Setting } from 'obsidian';
-import type AxlumenDashboardPlugin from './main';
+import type GullDockPlugin from './main';
 import { DashboardSettings, WidgetConfig } from './types';
 import { SETTINGS_DEBOUNCE_MS } from './constants';
 
 export const DEFAULT_SETTINGS: DashboardSettings = {
-  brandName: 'Axlumen',
+  brandName: 'GullDock',
   brandSub: '知是行之始，行是知之成。',
   quoteAuthor: '王阳明',
   countdowns: [
@@ -35,7 +35,7 @@ export const DEFAULT_SETTINGS: DashboardSettings = {
       indexPage: 'finance-wiki/wiki/index.md',
     },
     {
-      name: 'Axlumen Wiki',
+      name: 'Personal Wiki',
       icon: '🧠',
       color: '#A78BFA',
       rootPath: 'Axlumen-wiki',
@@ -86,7 +86,6 @@ export const DEFAULT_SETTINGS: DashboardSettings = {
   ],
   // Phase 2: 侧栏 Widget 开关
   widgets: {
-    weekCalendar: true,
     agentStatus: true,
     quickMemo: true,
   },
@@ -133,10 +132,10 @@ export const DEFAULT_SETTINGS: DashboardSettings = {
 };
 
 export class DashboardSettingTab extends PluginSettingTab {
-  plugin: AxlumenDashboardPlugin;
+  plugin: GullDockPlugin;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(app: App, plugin: AxlumenDashboardPlugin) {
+  constructor(app: App, plugin: GullDockPlugin) {
     super(app, plugin);
     this.plugin = plugin;
   }
@@ -153,7 +152,7 @@ export class DashboardSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl('h2', { text: 'Axlumen Dashboard 设置' });
+    containerEl.createEl('h2', { text: 'GullDock 设置' });
 
     // 品牌设置
     containerEl.createEl('h3', { text: '🎨 品牌' });
@@ -162,7 +161,7 @@ export class DashboardSettingTab extends PluginSettingTab {
       .setName('品牌名称')
       .setDesc('显示在 Hero 区的名称')
       .addText(text => text
-        .setPlaceholder('Axlumen')
+        .setPlaceholder('GullDock')
         .setValue(this.plugin.settings.brandName)
         .onChange(value => {
           this.plugin.settings.brandName = value;
@@ -319,16 +318,6 @@ export class DashboardSettingTab extends PluginSettingTab {
     });
 
     new Setting(containerEl)
-      .setName('周历')
-      .setDesc('显示本周日历，点击跳转 Daily Note')
-      .addToggle(toggle => toggle
-        .setValue(this.plugin.settings.widgets.weekCalendar)
-        .onChange(value => {
-          this.plugin.settings.widgets.weekCalendar = value;
-          this.debouncedSave();
-        }));
-
-    new Setting(containerEl)
       .setName('Agent 状态')
       .setDesc('显示 Agent 运行状态指示灯和队列信息')
       .addToggle(toggle => toggle
@@ -351,7 +340,7 @@ export class DashboardSettingTab extends PluginSettingTab {
     // 数据存储
     containerEl.createEl('h3', { text: '💾 数据存储' });
     containerEl.createEl('p', {
-      text: '待办清单数据存储在 _axlumen/todos.json（YAML frontmatter 格式），可被 Obsidian Sync 同步。',
+      text: '待办清单数据存储在 _gulldock/todos.json（YAML frontmatter 格式），可被 Obsidian Sync 同步。',
       cls: 'setting-item-description',
     });
 
@@ -359,8 +348,8 @@ export class DashboardSettingTab extends PluginSettingTab {
       .setName('存储路径')
       .setDesc('待办数据文件路径（相对 Vault 根目录）')
       .addText(text => text
-        .setPlaceholder('_axlumen/todos.json')
-        .setValue('_axlumen/todos.json')
+        .setPlaceholder('_gulldock/todos.json')
+        .setValue('_gulldock/todos.json')
         .setDisabled(true));
 
     // Wiki 配置
@@ -394,5 +383,122 @@ export class DashboardSettingTab extends PluginSettingTab {
             this.debouncedSave();
           }));
     }
+
+    // ===== Apex 新增设置 =====
+
+    // 番茄钟
+    containerEl.createEl('h3', { text: '🍅 番茄钟' });
+
+    new Setting(containerEl)
+      .setName('启用番茄钟')
+      .setDesc('在侧栏显示番茄钟计时器')
+      .addToggle(toggle => toggle
+        .setValue(this.plugin.settings.pomodoroEnabled ?? false)
+        .onChange(value => {
+          this.plugin.settings.pomodoroEnabled = value;
+          this.debouncedSave();
+        }));
+
+    new Setting(containerEl)
+      .setName('工作时长（分钟）')
+      .addText(text => text
+        .setPlaceholder('25')
+        .setValue(String(this.plugin.settings.pomodoroWorkMinutes ?? 25))
+        .onChange(value => {
+          this.plugin.settings.pomodoroWorkMinutes = parseInt(value) || 25;
+          this.debouncedSave();
+        }));
+
+    new Setting(containerEl)
+      .setName('短休息时长（分钟）')
+      .addText(text => text
+        .setPlaceholder('5')
+        .setValue(String(this.plugin.settings.pomodoroShortBreakMinutes ?? 5))
+        .onChange(value => {
+          this.plugin.settings.pomodoroShortBreakMinutes = parseInt(value) || 5;
+          this.debouncedSave();
+        }));
+
+    new Setting(containerEl)
+      .setName('长休息时长（分钟）')
+      .addText(text => text
+        .setPlaceholder('15')
+        .setValue(String(this.plugin.settings.pomodoroLongBreakMinutes ?? 15))
+        .onChange(value => {
+          this.plugin.settings.pomodoroLongBreakMinutes = parseInt(value) || 15;
+          this.debouncedSave();
+        }));
+
+    new Setting(containerEl)
+      .setName('长休息间隔')
+      .setDesc('每完成几个番茄后触发长休息')
+      .addText(text => text
+        .setPlaceholder('4')
+        .setValue(String(this.plugin.settings.pomodoroLongBreakInterval ?? 4))
+        .onChange(value => {
+          this.plugin.settings.pomodoroLongBreakInterval = parseInt(value) || 4;
+          this.debouncedSave();
+        }));
+
+    new Setting(containerEl)
+      .setName('自动开始休息')
+      .addToggle(toggle => toggle
+        .setValue(this.plugin.settings.pomodoroAutoStartBreak ?? true)
+        .onChange(value => {
+          this.plugin.settings.pomodoroAutoStartBreak = value;
+          this.debouncedSave();
+        }));
+
+    new Setting(containerEl)
+      .setName('提示音')
+      .addToggle(toggle => toggle
+        .setValue(this.plugin.settings.pomodoroSoundEnabled ?? true)
+        .onChange(value => {
+          this.plugin.settings.pomodoroSoundEnabled = value;
+          this.debouncedSave();
+        }));
+
+    // 天气
+    containerEl.createEl('h3', { text: '🌤️ 天气' });
+
+    new Setting(containerEl)
+      .setName('启用天气')
+      .setDesc('在侧栏显示天气信息')
+      .addToggle(toggle => toggle
+        .setValue(this.plugin.settings.widgetWeatherEnabled ?? false)
+        .onChange(value => {
+          this.plugin.settings.widgetWeatherEnabled = value;
+          this.debouncedSave();
+        }));
+
+    new Setting(containerEl)
+      .setName('城市')
+      .addText(text => text
+        .setPlaceholder('Shanghai')
+        .setValue(this.plugin.settings.widgetWeatherCity ?? 'Shanghai')
+        .onChange(value => {
+          this.plugin.settings.widgetWeatherCity = value;
+          this.debouncedSave();
+        }));
+
+    new Setting(containerEl)
+      .setName('纬度')
+      .addText(text => text
+        .setPlaceholder('31.23')
+        .setValue(String(this.plugin.settings.widgetWeatherLat ?? 31.23))
+        .onChange(value => {
+          this.plugin.settings.widgetWeatherLat = parseFloat(value) || 31.23;
+          this.debouncedSave();
+        }));
+
+    new Setting(containerEl)
+      .setName('经度')
+      .addText(text => text
+        .setPlaceholder('121.47')
+        .setValue(String(this.plugin.settings.widgetWeatherLon ?? 121.47))
+        .onChange(value => {
+          this.plugin.settings.widgetWeatherLon = parseFloat(value) || 121.47;
+          this.debouncedSave();
+        }));
   }
 }

@@ -11,8 +11,9 @@
  * - 禁止直接持有 View/DOM 引用，所有对外通信通过 callback
  */
 
-import { App, TFile } from 'obsidian';
+import { App, TFile, TFolder } from 'obsidian';
 import { Disposable } from '../types';
+import type { PrivacySanitizer } from '../services/PrivacySanitizer';
 
 // ==================== 类型定义 ====================
 
@@ -29,6 +30,10 @@ export interface AgentTask {
   outputPath: string;
   progress?: number;
   error?: string;
+  /** Token 统计 */
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
 }
 
 export interface WorkflowTemplate {
@@ -38,6 +43,14 @@ export interface WorkflowTemplate {
   description: string;
   prompt: string;
   defaultOutput?: string;
+  /** L2 路由 purpose（≤100 字，截断安全） */
+  purpose?: string;
+  /** 逗号分隔的触发关键词 */
+  trigger?: string;
+  /** 逗号分隔的禁用条件 */
+  disableWhen?: string;
+  /** 风险等级 */
+  riskLevel?: 'low' | 'medium' | 'high';
 }
 
 export type ProgressCallback = (taskId: string, logLine: string, progress?: number) => void;
@@ -95,6 +108,17 @@ export const MOCK_WORKFLOWS: WorkflowTemplate[] = [
     prompt: `你是 RSS 摘要助手。给定 RSS 源列表：\n1. 抓取最新条目（标题+链接+摘要）\n2. 按主题聚类、去重\n3. 输出「今日必读」精选 3-5 条，每条 < 80 字\n4. 标注与 Vault 已有知识的关联`,
     defaultOutput: 'dashboard/outputs/rss-digest-{{date}}.md',
   },
+  {
+    id: 'github-intake',
+    category: 'GitHub Intake',
+    name: 'GitHub Project Intake',
+    description: '评估 GitHub 项目，决定是否入库',
+    purpose: 'Evaluate GitHub project, generate decision card, extract knowledge',
+    trigger: 'github, repo, project, ingest, evaluate',
+    riskLevel: 'medium',
+    prompt: `你是 GullDock 的 GitHub 项目评估员。给定 GitHub URL:\n\n## 步骤 1：获取项目信息\n使用 gh CLI 或 webfetch 获取 README、Stars、Forks、License、最后提交时间\n\n## 步骤 2：快速否决\n- 已归档或 12 个月无提交 → REJECT\n- License 限制性过强 → 标记\n\n## 步骤 3：30 秒定位\n回答：这个项目是 [什么] 为 [谁] 提供 [什么] 的工具\n\n## 步骤 4：证据表\n| 评判维度 | 得分 (1-5) | 证据 |\n|----------|-----------|------|\n| 与 Vault 相关性 | | |\n| 文档质量 | | |\n| 活跃度 | | |\n| 知识密度 | | |\n\n## 步骤 5：决策\n入库（活跃）/ 入库（冷库）/ 拒绝\n\n## 步骤 6：知识提取\n提取 2-5 个可复用原则作为 Wiki 页`,
+    defaultOutput: 'dashboard/outputs/github-intake-{{date}}.md',
+  },
 ];
 
 // ==================== 路径常量 ====================
@@ -103,6 +127,10 @@ const WORKFLOWS_DIR = 'dashboard/workflows';
 const LOGS_DIR = 'dashboard/logs';
 const CACHE_DIR = 'dashboard/cache';
 const RUNS_FILE = `${CACHE_DIR}/agent-runs.json`;
+
+// ==================== 超时常量 ====================
+
+const TASK_TIMEOUT_MS = 5 * 60 * 1000; // 5 分钟超时（真实 AI 任务需要更长时间）
 
 // ==================== 正则：简单 frontmatter 解析 =================---
 
@@ -136,7 +164,7 @@ export class AgentRunner implements Disposable {
   private completeCallbacks: Set<CompleteCallback> = new Set();
   private statusChangeCallbacks: Set<StatusChangeCallback> = new Set();
   private tickInterval: number | null = null;
-  private mockMode: boolean = true;
+  private mockMode: boolean = false;
   private tickCallbacks: Set<() => void> = new Set();
   private DisposeListeners: Array<() => void> = [];
   private queue: Array<{ workflowId: string; params?: Record<string, string>; source: string }> = [];
@@ -145,8 +173,28 @@ export class AgentRunner implements Disposable {
   private pendingSpawns: Set<ReturnType<NonNullable<typeof import('child_process')>['spawn']>> = new Set();
   private _disposed = false;
 
+  private privacySanitizer: PrivacySanitizer | null = null;
+
   constructor(app: App) {
     this.app = app;
+  }
+
+  /** 注入隐私脱敏器 */
+  setPrivacySanitizer(sanitizer: PrivacySanitizer): void {
+    this.privacySanitizer = sanitizer;
+  }
+
+  /** 获取各 workflow 上次运行时间戳 */
+  getRunHistoryTimestamps(): Record<string, number> {
+    const timestamps: Record<string, number> = {};
+    // 从 activeTasks 中提取
+    for (const task of this.activeTasks.values()) {
+      if (task.endTime && !timestamps[task.workflowId]) {
+        timestamps[task.workflowId] = task.endTime;
+      }
+    }
+    // TODO: 从 agent-runs.json 中读取历史记录
+    return timestamps;
   }
 
   get disposed(): boolean {
@@ -292,6 +340,19 @@ export class AgentRunner implements Disposable {
     return task;
   }
 
+  /**
+   * 根据用户输入自动路由到最佳 workflow 并执行。
+   * 返回 null 如果没有匹配的 workflow。
+   */
+  async routeAndRun(userInput: string, params?: Record<string, string>): Promise<AgentTask | null> {
+    // 动态导入避免循环依赖
+    const { RoutingEngine } = await import('./RoutingEngine');
+    const engine = new RoutingEngine(this.app, this);
+    const route = await engine.route(userInput);
+    if (!route) return null;
+    return this.run(route.id, params);
+  }
+
   private executeMockTask(task: AgentTask, prompt: string): void {
     const mockLogs = [
       '[init] 加载工作流模板...',
@@ -369,12 +430,13 @@ export class AgentRunner implements Disposable {
 
       const nodeRequire = this.getNodeRequire('child_process');
       if (!nodeRequire || !nodeRequire.spawn) {
-        this.failTask(task, '当前环境不支持 Node.js spawn，Agent CLI 调用已禁用');
+        // Sandbox fallback: 写入 vault 文件队列，由外部脚本消费
+        await this.fallbackToVaultQueue(task, prompt);
         return;
       }
       const spawn = nodeRequire.spawn;
 
-      const pluginSettings = (this.app as any).plugins?.plugins?.['axlumen-dashboard']?.settings;
+      const pluginSettings = (this.app as any).plugins?.plugins?.['gulldock']?.settings;
       let vaultPath: string = pluginSettings?.vaultPath || '';
       if (!vaultPath) {
         const adapter = this.app.vault.adapter as any;
@@ -388,7 +450,7 @@ export class AgentRunner implements Disposable {
       if (!vaultPath) vaultPath = '.';
 
       const args = ['-p', prompt];
-      const settings = (this.app as any).plugins?.plugins?.['axlumen-dashboard']?.settings;
+      const settings = (this.app as any).plugins?.plugins?.['gulldock']?.settings;
       const claudePath = settings?.claudeCodePath || 'claude';
 
       this.appendLog(task, `> ${claudePath} -p "...(prompt, ${prompt.length} chars)"\n`);
@@ -405,6 +467,19 @@ export class AgentRunner implements Disposable {
       });
       this.pendingSpawns.add(proc as any);
 
+      // 超时机制：60 秒后强制终止进程
+      const timeoutId = setTimeout(() => {
+        if (this.pendingSpawns.has(proc as any)) {
+          this.appendLog(task, `\n[TIMEOUT] 任务执行超时 (${TASK_TIMEOUT_MS / 1000}s)，正在终止...`);
+          try {
+            proc.kill();
+          } catch { /* ignore */ }
+          this.failTask(task, `任务执行超时 (${TASK_TIMEOUT_MS / 1000}s)`);
+          this.persistRuns();
+          this.handleTaskCompleteForQueue();
+        }
+      }, TASK_TIMEOUT_MS);
+
       let stdout = '';
       let stderr = '';
 
@@ -413,6 +488,8 @@ export class AgentRunner implements Disposable {
         stdout += text;
         this.appendLog(task, text);
         this.emitProgress(task.id, text);
+        // 解析 token 统计
+        this.parseTokenUsage(task, text);
       });
 
       proc.stderr.on('data', (data: Buffer) => {
@@ -422,6 +499,7 @@ export class AgentRunner implements Disposable {
       });
 
       proc.on('close', async (code: number) => {
+        clearTimeout(timeoutId);
         this.pendingSpawns.delete(proc as any);
         const duration = ((Date.now() - task.startTime) / 1000).toFixed(1);
 
@@ -429,7 +507,22 @@ export class AgentRunner implements Disposable {
           task.status = 'completed';
           task.endTime = Date.now();
           try {
-            const outputContent = `---\ntaskId: ${task.id}\nworkflowId: ${task.workflowId}\ncompletedAt: ${new Date().toISOString()}\nduration: ${duration}s\n---\n\n${stdout}`;
+            let outputContent = `---\ntaskId: ${task.id}\nworkflowId: ${task.workflowId}\ncompletedAt: ${new Date().toISOString()}\nduration: ${duration}s\n---\n\n${stdout}`;
+
+            // 隐私脱敏检查
+            if (this.privacySanitizer) {
+              const report = this.privacySanitizer.sanitize(outputContent);
+              if (report.findings.length > 0) {
+                this.appendLog(task, `\n[PRIVACY] 发现 ${report.findings.length} 处敏感信息，已脱敏`);
+                if (report.sanitizedContent) {
+                  outputContent = report.sanitizedContent;
+                }
+                if (report.blocked) {
+                  this.appendLog(task, `\n[PRIVACY] 检测到阻断级敏感信息，输出已脱敏`);
+                }
+              }
+            }
+
             await vault.create(task.outputPath, outputContent);
           } catch { /* 输出目录可能已存在 */ }
           this.appendLog(task, `\n[DONE] 完成 · 耗时 ${duration}s`);
@@ -450,6 +543,7 @@ export class AgentRunner implements Disposable {
       });
 
       proc.on('error', async (err: Error) => {
+        clearTimeout(timeoutId);
         this.pendingSpawns.delete(proc as any);
         this.failTask(task, err.message);
         await this.persistRuns();
@@ -464,6 +558,111 @@ export class AgentRunner implements Disposable {
 
   private appendLog(task: AgentTask, text: string): void {
     task.log += text;
+  }
+
+  /** 解析 stdout 中的 token 使用统计 */
+  private parseTokenUsage(task: AgentTask, text: string): void {
+    // 匹配常见格式: "tokens: 1234", "input_tokens: 1000, output_tokens: 234"
+    const tokenMatch = text.match(/tokens?:\s*(\d+)/i);
+    if (tokenMatch) {
+      const tokens = parseInt(tokenMatch[1]);
+      if (!task.totalTokens) task.totalTokens = 0;
+      task.totalTokens += tokens;
+    }
+    const inputMatch = text.match(/input[_\s]tokens?:\s*(\d+)/i);
+    if (inputMatch) {
+      task.inputTokens = (task.inputTokens || 0) + parseInt(inputMatch[1]);
+    }
+    const outputMatch = text.match(/output[_\s]tokens?:\s*(\d+)/i);
+    if (outputMatch) {
+      task.outputTokens = (task.outputTokens || 0) + parseInt(outputMatch[1]);
+    }
+  }
+
+  /** 获取 token 统计摘要 */
+  getTokenStats(): { totalInput: number; totalOutput: number; totalAll: number; taskCount: number } {
+    let totalInput = 0;
+    let totalOutput = 0;
+    let totalAll = 0;
+    let taskCount = 0;
+
+    // 已完成的任务
+    for (const [, task] of this.activeTasks) {
+      totalInput += task.inputTokens || 0;
+      totalOutput += task.outputTokens || 0;
+      totalAll += task.totalTokens || 0;
+      taskCount++;
+    }
+
+    return { totalInput, totalOutput, totalAll, taskCount };
+  }
+
+  /**
+   * Sandbox fallback: 把任务写入 vault 文件队列，触发自定义事件通知外部脚本。
+   * 当 child_process.spawn 不可用时（Obsidian 浏览器沙箱），使用此路径。
+   */
+  private async fallbackToVaultQueue(task: AgentTask, prompt: string): Promise<void> {
+    const vault = this.app.vault;
+    const tasksDir = '.gulldock-tasks';
+    const queueFile = `${tasksDir}/queue.json`;
+    const resultsDir = `${tasksDir}/results`;
+
+    try {
+      await this.ensureDir(tasksDir);
+      await this.ensureDir(resultsDir);
+
+      // 读取现有队列
+      let queue: Array<Record<string, unknown>> = [];
+      try {
+        const queueF = vault.getAbstractFileByPath(queueFile);
+        if (queueF instanceof TFile) {
+          queue = JSON.parse(await vault.read(queueF));
+        }
+      } catch { /* 初始化空队列 */ }
+
+      // 追加新任务
+      const entry = {
+        id: task.id,
+        type: task.workflowId,
+        prompt,
+        outputPath: task.outputPath,
+        createdAt: new Date().toISOString(),
+        status: 'pending',
+      };
+      queue = queue.filter((t: any) => t.status === 'pending');
+      queue.push(entry);
+      await vault.create(queueFile, JSON.stringify(queue, null, 2));
+
+      // 生成独立 prompt 文件
+      const safeName = task.id.replace(/[^a-zA-Z0-9_-]/g, '_');
+      const promptFile = `${tasksDir}/tasks/${safeName}.md`;
+      const promptContent = `---\ntaskId: ${task.id}\ntype: ${task.workflowId}\ncreatedAt: ${entry.createdAt}\nstatus: pending\n---\n\n# Agent Task: ${task.workflowId}\n\n## Prompt\n\n${prompt}\n\n## 执行指令\n\n\`\`\`bash\nclaude -p "$(cat ${promptFile})"\n\`\`\`\n\n## 结果回写\n\n执行完成后，将结果保存到：\n${resultsDir}/${safeName}.md\n`;
+      try {
+        await vault.create(promptFile, promptContent);
+      } catch { /* 文件已存在 */ }
+
+      // 更新任务状态为等待外部消费
+      task.status = 'completed';
+      task.endTime = Date.now();
+      task.log += `[FALLBACK] CLI 不可用，已写入 vault 文件队列 (${queueFile})\n`;
+      task.log += `[FALLBACK] 等待外部脚本消费: claude -p --input ${promptFile}\n`;
+      this.appendLog(task, `\n[DONE] 任务已入队 · 等待外部执行`);
+      this.emitComplete(task.id, true, task.outputPath);
+      this.emitStatusChange(task.id, 'completed', task);
+      this.activeTasks.delete(task.id);
+      await this.persistRuns();
+      this.handleTaskCompleteForQueue();
+
+      // 触发自定义事件，通知外部脚本
+      try {
+        document.dispatchEvent(new CustomEvent('gulldock-agent-enqueue', {
+          detail: { taskId: task.id, queueFile },
+        }));
+      } catch { /* ignore */ }
+
+    } catch (err: any) {
+      this.failTask(task, `队列入队失败: ${err?.message || String(err)}`);
+    }
   }
 
   private failTask(task: AgentTask, error: string): void {
@@ -510,7 +709,7 @@ export class AgentRunner implements Disposable {
         return all.slice(0, limit);
       }
     } catch (e) {
-      console.warn('[Axlumen] 读取运行历史失败:', (e as Error).message);
+      console.warn('[GullDock] 读取运行历史失败:', (e as Error).message);
     }
     return [];
   }
@@ -578,6 +777,10 @@ export class AgentRunner implements Disposable {
           description: fm.description || '',
           prompt: fm.prompt || body,
           defaultOutput: fm.defaultOutput,
+          purpose: fm.purpose || fm.description?.slice(0, 100) || '',
+          trigger: fm.trigger || '',
+          disableWhen: fm.disableWhen || '',
+          riskLevel: (fm.riskLevel as WorkflowTemplate['riskLevel']) || 'low',
         };
         if (existingIdx >= 0) {
           templates[existingIdx] = tpl;
@@ -641,7 +844,20 @@ defaultOutput: "dashboard/outputs/${id}-output.md"
     return template.replace(/\{\{(\w+)\}\}/g, (_, key) => params[key] || `{{${key}}}`);
   }
 
-  private async ensureDir(_path: string): Promise<void> {}
+  private async ensureDir(dirPath: string): Promise<void> {
+    const vault = this.app.vault;
+    const parts = dirPath.split('/');
+    let current = '';
+    for (const part of parts) {
+      current = current ? current + '/' + part : part;
+      const existing = vault.getAbstractFileByPath(current);
+      if (!existing) {
+        await vault.createFolder(current);
+      } else if (!(existing instanceof TFolder)) {
+        break; // path conflict — stop
+      }
+    }
+  }
 
   private getNodeRequire(moduleName: string): any {
     try {

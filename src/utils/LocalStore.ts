@@ -11,7 +11,7 @@
  * - 真正的配置数据（规则、设置）：通过 plugin.loadData / plugin.saveData
  */
 
-import type AxlumenDashboardPlugin from '../main';
+import type GullDockPlugin from '../main';
 
 // ============== 类型 ==============
 
@@ -30,6 +30,7 @@ export interface LocalStoreData {
   cardOrder: string[];
   memoDraft: string;
   feedLastRefresh: string;
+  sectionHeights?: Record<string, number>;
 }
 
 // ============== 默认值 ==============
@@ -45,7 +46,7 @@ const DEFAULT_DATA: LocalStoreData = {
 // ============== 内部状态 ==============
 
 let _data: LocalStoreData = { ...DEFAULT_DATA };
-let _plugin: AxlumenDashboardPlugin | null = null;
+let _plugin: GullDockPlugin | null = null;
 let _dirty = false;
 let _saveTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -53,7 +54,7 @@ let _saveTimer: ReturnType<typeof setTimeout> | null = null;
  * 初始化 LocalStore — 由 Plugin.onload 调用
  * 从 plugin.loadData() 读取持久化数据，合并到内存缓存
  */
-export function initLocalStore(plugin: AxlumenDashboardPlugin): void {
+export function initLocalStore(plugin: GullDockPlugin): void {
   _plugin = plugin;
   const saved = plugin.settings.uiState as LocalStoreData | undefined;
   if (saved) {

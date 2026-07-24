@@ -1,7 +1,7 @@
 {
-  "name": "axlumen-dashboard",
-  "version": "2.0.0",
-  "description": "Axlumen 个人高密度工作台 Obsidian 插件",
+  "name": "gulldock",
+  "version": "3.0.0",
+  "description": "GullDock — Agent-First Vault Intelligence Dashboard",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",

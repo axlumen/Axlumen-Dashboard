@@ -1,5 +1,5 @@
 /**
- * main.ts — Axlumen Dashboard 插件入口
+ * main.ts — GullDock 插件入口
  *
  * 个人控制面板：三 Wiki 统计、项目追踪、待办、Memo、金句轮播
  *
@@ -7,17 +7,21 @@
  * - onunload 时调用 AgentRunner.dispose() + AutomationEngine.stopAll()
  */
 
-import { Plugin, WorkspaceLeaf } from 'obsidian';
+import { Plugin, WorkspaceLeaf, Notice, Modal } from 'obsidian';
 import type { DashboardSettings } from './types';
 import { DEFAULT_SETTINGS, DashboardSettingTab } from './settings';
 import { DashboardView, VIEW_TYPE_DASHBOARD } from './view';
 import { AgentRunner } from './agent/AgentRunner';
+import { RoutingEngine } from './agent/RoutingEngine';
 import { VaultScanner } from './services/VaultScanner';
+import { CapabilityManifestService } from './services/CapabilityManifest';
+import { PrivacySanitizer } from './services/PrivacySanitizer';
 import { initLocalStore, flushLocalStore } from './utils/LocalStore';
 import {
   atomicWrite, recoverFromTmp, createBackup, restoreFromBackup, safeRead,
 } from './utils/atomicWrite';
 import { getWriteLock, releaseAllWriteLocks } from './utils/WriteLock';
+import { lintAllTemplates } from './widgets/templateLint';
 
 /** 递归深度合并：保留默认值结构，覆盖持久化数据 */
 function deepMerge<T>(defaults: T, saved: Partial<T>): T {
@@ -39,11 +43,14 @@ function deepMerge<T>(defaults: T, saved: Partial<T>): T {
   return result;
 }
 
-export default class AxlumenDashboardPlugin extends Plugin {
+export default class GullDockPlugin extends Plugin {
   settings: DashboardSettings;
   private statusBarEl: HTMLElement | null = null;
   private _agentRunner: AgentRunner | null = null;
   private _vaultScanner: VaultScanner | null = null;
+  private _routingEngine: RoutingEngine | null = null;
+  private _capabilityManifest: CapabilityManifestService | null = null;
+  private _privacySanitizer: PrivacySanitizer | null = null;
 
   /** 共享单例 AgentRunner（贯穿整个插件生命周期） */
   get agentRunner(): AgentRunner {
@@ -57,6 +64,28 @@ export default class AxlumenDashboardPlugin extends Plugin {
     return this._vaultScanner;
   }
 
+  /** 共享单例 RoutingEngine */
+  get routingEngine(): RoutingEngine {
+    if (!this._routingEngine) this._routingEngine = new RoutingEngine(this.app, this.agentRunner);
+    return this._routingEngine;
+  }
+
+  /** 共享单例 CapabilityManifestService */
+  get capabilityManifest(): CapabilityManifestService {
+    if (!this._capabilityManifest) {
+      this._capabilityManifest = new CapabilityManifestService(() => this.saveSettings());
+    }
+    return this._capabilityManifest;
+  }
+
+  /** 共享单例 PrivacySanitizer */
+  get privacySanitizer(): PrivacySanitizer {
+    if (!this._privacySanitizer) {
+      this._privacySanitizer = new PrivacySanitizer();
+    }
+    return this._privacySanitizer;
+  }
+
   async onload() {
     await this.loadSettings();
 
@@ -66,6 +95,22 @@ export default class AxlumenDashboardPlugin extends Plugin {
     // 预创建共享实例
     this.agentRunner;
     this.vaultScanner;
+    this.routingEngine;
+    this.capabilityManifest;
+    this.privacySanitizer;
+
+    // 初始化 TGCR 整合：加载能力冷库数据
+    if (this.settings.capabilityManifest) {
+      this.capabilityManifest.load(this.settings.capabilityManifest);
+    }
+
+    // 初始化 TGCR 整合：加载隐私脱敏自定义规则
+    if (this.settings.privacySanitizeRules) {
+      this.privacySanitizer.loadRules(this.settings.privacySanitizeRules);
+    }
+
+    // 注入隐私脱敏器到 AgentRunner
+    this.agentRunner.setPrivacySanitizer(this.privacySanitizer);
 
     // 注册 Dashboard 视图
     this.registerView(
@@ -74,14 +119,14 @@ export default class AxlumenDashboardPlugin extends Plugin {
     );
 
     // 侧栏图标
-    this.addRibbonIcon('layout-dashboard', 'Axlumen Dashboard', () => {
+    this.addRibbonIcon('layout-dashboard', 'GullDock', () => {
       this.activateView();
     });
 
     // 命令面板
     this.addCommand({
       id: 'open-dashboard',
-      name: '打开 Axlumen Dashboard',
+      name: '打开 GullDock',
       callback: () => this.activateView(),
     });
 
@@ -126,10 +171,22 @@ export default class AxlumenDashboardPlugin extends Plugin {
       callback: () => this.clearAllCache(),
     });
 
+    this.addCommand({
+      id: 'lint-workflow-templates',
+      name: 'Agent: Lint Workflow Templates',
+      callback: async () => {
+        const results = await lintAllTemplates(this.agentRunner);
+        const errors = results.filter(r => !r.report.valid).length;
+        const warnings = results.filter(r => r.report.valid && r.report.violations.length > 0).length;
+        const clean = results.length - errors - warnings;
+        new LintResultsModal(this.app, results, clean, warnings, errors).open();
+      },
+    });
+
     // ==================== P6: 底部状态栏微件 ====================
 
     this.statusBarEl = this.addStatusBarItem();
-    this.statusBarEl.addClass('axlumen-status-bar');
+    this.statusBarEl.addClass('gulldock-status-bar');
     this.updateStatusBar();
 
     // 状态栏点击监听器 — 使用 registerDomEvent 自动清理
@@ -143,6 +200,8 @@ export default class AxlumenDashboardPlugin extends Plugin {
   onunload() {
     // 清理共享 runner（停定时器 / 杀 pending CLI / 清所有回调）
     this._agentRunner?.dispose();
+    // 清理 TGCR 整合
+    this._capabilityManifest?.dispose();
     // 立即刷出 LocalStore 脏数据
     flushLocalStore();
     // 释放所有写锁
@@ -168,7 +227,7 @@ export default class AxlumenDashboardPlugin extends Plugin {
         saved = JSON.parse(raw);
       }
     } catch (e) {
-      console.error('[Axlumen] data.json 损坏，尝试从备份恢复:', e);
+      console.error('[GullDock] data.json 损坏，尝试从备份恢复:', e);
     }
 
     // 3. 如果 data.json 加载失败，尝试 .bak
@@ -182,7 +241,7 @@ export default class AxlumenDashboardPlugin extends Plugin {
           }
         }
       } catch (e) {
-        console.error('[Axlumen] .bak 也损坏，使用默认配置:', e);
+        console.error('[GullDock] .bak 也损坏，使用默认配置:', e);
       }
     }
 
@@ -191,6 +250,10 @@ export default class AxlumenDashboardPlugin extends Plugin {
   }
 
   async saveSettings() {
+    // 同步 TGCR 数据到 settings
+    this.settings.capabilityManifest = this.capabilityManifest.serialize();
+    this.settings.privacySanitizeRules = this.privacySanitizer.serializeRules() as DashboardSettings['privacySanitizeRules'];
+
     const lock = getWriteLock('data.json');
     await lock.acquire(async () => {
       await atomicWrite(this.app.vault, 'data.json', JSON.stringify(this.settings, null, 2));
@@ -232,8 +295,8 @@ export default class AxlumenDashboardPlugin extends Plugin {
 
   // ==================== P6: 命令处理辅助方法 ====================
 
-  private runWorkflow(workflowId: string) {
-    this.agentRunner.run(workflowId).catch(() => { /* 错误由 AgentRunner 内部处理 */ });
+  private runWorkflow(workflowId: string, params?: Record<string, string>) {
+    this.agentRunner.run(workflowId, params).catch(() => { /* 错误由 AgentRunner 内部处理 */ });
     this.activateView();
   }
 
@@ -246,7 +309,7 @@ export default class AxlumenDashboardPlugin extends Plugin {
       await this.app.vault.create(fileName, content);
       await this.app.workspace.openLinkText(fileName, '', 'tab');
     } catch (e) {
-      console.warn('[Axlumen] Quick Capture 失败:', (e as Error).message);
+      console.warn('[GullDock] Quick Capture 失败:', (e as Error).message);
     }
   }
 
@@ -281,19 +344,74 @@ export default class AxlumenDashboardPlugin extends Plugin {
     if (!this.statusBarEl) return;
     this.statusBarEl.empty();
 
-    const dot = this.statusBarEl.createDiv({ cls: 'axlumen-sb-dot axlumen-sb-dot--idle' });
-    dot.title = 'Axlumen Dashboard';
+    const dot = this.statusBarEl.createDiv({ cls: 'gulldock-sb-dot gulldock-sb-dot--idle' });
+    dot.title = 'GullDock';
 
     this.vaultScanner.scanIncremental().then(result => {
       if (result.ok) {
         const count = result.value.inboxFiles?.length || 0;
         if (count > 0) {
-          const badge = this.statusBarEl!.createSpan({ cls: 'axlumen-sb-badge', text: String(count) });
+          const badge = this.statusBarEl!.createSpan({ cls: 'gulldock-sb-badge', text: String(count) });
           badge.title = count + ' unprocessed inbox items';
         }
       }
     }).catch(() => {});
 
-    this.statusBarEl.addClass('axlumen-sb-clickable');
+    this.statusBarEl.addClass('gulldock-sb-clickable');
+  }
+}
+
+// ==================== Lint 结果弹窗 ====================
+
+class LintResultsModal extends Modal {
+  private results: Array<{ templateId: string; templateName: string; report: { valid: boolean; violations: Array<{ field: string; rule: string; severity: string; message: string }> } }>;
+  private clean: number;
+  private warnings: number;
+  private errors: number;
+
+  constructor(app: any, results: Array<{ templateId: string; templateName: string; report: { valid: boolean; violations: Array<{ field: string; rule: string; severity: string; message: string }> } }>, clean: number, warnings: number, errors: number) {
+    super(app);
+    this.results = results;
+    this.clean = clean;
+    this.warnings = warnings;
+    this.errors = errors;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.createEl('h2', { text: 'Workflow Lint Results' });
+
+    // 摘要
+    const summary = contentEl.createEl('div', { cls: 'ax-lint-summary' });
+    summary.createEl('span', { text: `${this.clean} 通过`, cls: 'ax-lint-count--ok' });
+    summary.createEl('span', { text: ` ${this.warnings} 警告`, cls: 'ax-lint-count--warn' });
+    summary.createEl('span', { text: ` ${this.errors} 错误`, cls: 'ax-lint-count--err' });
+
+    // 有问题的模板
+    const problematic = this.results.filter(r => r.report.violations.length > 0);
+    if (problematic.length === 0) {
+      contentEl.createEl('p', { text: '所有模板通过检查！', cls: 'ax-lint-all-pass' });
+    } else {
+      for (const result of problematic) {
+        const card = contentEl.createEl('div', { cls: 'ax-lint-card' });
+        const hasError = !result.report.valid;
+
+        const header = card.createEl('div', { cls: 'ax-lint-card-header' });
+        header.createEl('span', { text: hasError ? 'ERROR' : 'WARN', cls: `ax-lint-badge ax-lint-badge--${hasError ? 'err' : 'warn'}` });
+        header.createEl('span', { text: result.templateName, cls: 'ax-lint-template-name' });
+        header.createEl('span', { text: ` (${result.templateId})`, cls: 'ax-lint-template-id' });
+
+        const list = card.createEl('ul', { cls: 'ax-lint-violations' });
+        for (const v of result.report.violations) {
+          const li = list.createEl('li', { cls: `ax-lint-violation ax-lint-violation--${v.severity}` });
+          li.createEl('code', { text: v.rule });
+          li.appendText(` [${v.field}] ${v.message}`);
+        }
+      }
+    }
+  }
+
+  onClose() {
+    this.contentEl.empty();
   }
 }

@@ -1,9 +1,9 @@
 {
-  "id": "axlumen-dashboard",
-  "name": "Axlumen Dashboard",
-  "version": "2.0.0",
+  "id": "gulldock",
+  "name": "GullDock",
+  "version": "3.0.0",
   "minAppVersion": "1.5.0",
-  "description": "个人高密度工作台 — Wiki 统计、侧栏 Widget、卡片拖拽折叠、多源信息流、Agent 状态监控。",
-  "author": "Axlumen",
+  "description": "GullDock — Agent-First Vault Intelligence Dashboard. GullDock functional modules + Apex visual design.",
+  "author": "GullDock",
   "isDesktopOnly": true
 }

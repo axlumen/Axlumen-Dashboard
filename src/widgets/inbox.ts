@@ -253,7 +253,7 @@ export function createInboxPanel(
  */
 export async function buildInboxIngestPrompt(app: App, items: InboxItem[]): Promise<string> {
   const parts: string[] = [
-    '你是 Axlumen 的知识库管理助手。请将以下 Inbox 文件归档到合适的 Wiki。',
+    '你是 GullDock 的知识库管理助手。请将以下 Inbox 文件归档到合适的 Wiki。',
     '',
     '## 处理规则',
     '1. 读取每个 Inbox 文件的内容',

@@ -69,73 +69,43 @@ const HEALTH_FILE = `${CACHE_DIR}/vault-health.json`;
 const CHUNK_SIZE = 50;
 const DEBOUNCE_MS = 500;
 
-// ==================== Mock 数据生成 ====================
+// ==================== 空数据生成 ====================
 
-function generateMockHealthData(): VaultHealthData {
-  const now = new Date();
-  const notes = 247;
-  const tags = 89;
-  const links = 1234;
-  const brokenLinks = 12;
-  const orphanNotes = 18;
-  const tagCoverage = 78;
-
-  const folderDistribution = [
-    { name: 'tech-wiki/concepts', count: 62 },
-    { name: 'tech-wiki/entities', count: 41 },
-    { name: 'finance-wiki/concepts', count: 38 },
-    { name: 'finance-wiki/sources', count: 25 },
-    { name: 'Axlumen-wiki/synthesis', count: 19 },
-    { name: 'Daily', count: 45 },
-    { name: 'Inbox', count: 8 },
-    { name: 'Other', count: 9 },
-  ];
-
-  const dailyActivityMultiDim: DailyActivityMultiDim = {
-    notes: generateDailySeries(now, 90, 3, 1.5),
-    words: generateDailySeries(now, 90, 3500, 1200),
-    tasks: generateDailySeries(now, 90, 5, 3),
-    agentRuns: generateDailySeries(now, 90, 2, 1.5),
-  };
-
-  const inboxFiles: InboxFileItem[] = [
-    { path: 'Inbox/2026-07-10-meeting-notes.md', basename: '2026-07-10-meeting-notes', mtime: Date.now() - 4 * MS_PER_DAY, daysOld: 4, status: 'inbox', title: '会议记录：产业链投研讨论' },
-    { path: 'Inbox/2026-07-12-ai-paper.md', basename: '2026-07-12-ai-paper', mtime: Date.now() - 2 * MS_PER_DAY, daysOld: 2, status: 'inbox', title: 'AI Agent 最新论文阅读笔记' },
-    { path: 'Inbox/2026-07-08-trading-idea.md', basename: '2026-07-08-trading-idea', mtime: Date.now() - 6 * MS_PER_DAY, daysOld: 6, status: 'inbox', title: '交易策略初步想法' },
-    { path: 'Inbox/2026-07-13-quick-thought.md', basename: '2026-07-13-quick-thought', mtime: Date.now() - 1 * MS_PER_DAY, daysOld: 1, status: 'inbox', title: '关于知识管理的思考片段' },
-    { path: 'Inbox/2026-07-05-book-notes.md', basename: '2026-07-05-book-notes', mtime: Date.now() - 9 * MS_PER_DAY, daysOld: 9, status: 'inbox', title: '《反脆弱》读书笔记' },
-  ];
-
-  return {
-    totalNotes: notes,
-    totalTags: tags,
-    totalLinks: links,
-    brokenLinks,
-    orphanNotes,
-    tagCoverage,
-    folderDistribution,
-    dailyActivityMultiDim,
-    inboxFiles,
-    lastScanned: now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
-    healthScore: 82,
-    weeklyDelta: 4,
-  };
-}
-
-/** 生成正态分布随机序列 */
-function generateDailySeries(now: Date, days: number, mean: number, stddev: number): DayActivity[] {
+/** 生成空的每日活动序列（最近 N 天，计数为 0） */
+function generateEmptyDailySeries(days: number): DayActivity[] {
   const result: DayActivity[] = [];
+  const now = new Date();
   for (let i = days - 1; i >= 0; i--) {
     const d = new Date(now);
     d.setDate(d.getDate() - i);
     const key = d.toISOString().slice(0, 10);
-    const dayOfWeek = d.getDay();
-    const weekendFactor = (dayOfWeek === 0 || dayOfWeek === 6) ? 0.3 : 1;
-    const noise = (Math.random() - 0.5) * 2 * stddev;
-    const count = Math.max(0, Math.round((mean + noise) * weekendFactor));
-    result.push({ date: key, count });
+    result.push({ date: key, count: 0 });
   }
   return result;
+}
+
+/** 生成空的 VaultHealthData */
+function generateEmptyHealthData(): VaultHealthData {
+  const now = new Date();
+  return {
+    totalNotes: 0,
+    totalTags: 0,
+    totalLinks: 0,
+    brokenLinks: 0,
+    orphanNotes: 0,
+    tagCoverage: 0,
+    folderDistribution: [],
+    dailyActivityMultiDim: {
+      notes: generateEmptyDailySeries(90),
+      words: generateEmptyDailySeries(90),
+      tasks: generateEmptyDailySeries(90),
+      agentRuns: generateEmptyDailySeries(90),
+    },
+    inboxFiles: [],
+    lastScanned: now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
+    healthScore: 0,
+    weeklyDelta: 0,
+  };
 }
 
 // ==================== VaultScanner 类 ====================
@@ -287,12 +257,12 @@ export class VaultScanner implements Disposable {
       const totalFiles = allFiles.length;
 
       if (totalFiles === 0) {
-        const mock = generateMockHealthData();
-        this.cache = mock;
+        const emptyData = generateEmptyHealthData();
+        this.cache = emptyData;
         this.cacheValid = true;
-        await this.writeCache(mock);
+        await this.writeCache(emptyData);
         onProgress?.(100, '完成');
-        return ok(mock);
+        return ok(emptyData);
       }
 
       onProgress?.(5, `扫描 ${totalFiles} 个文件...`);
@@ -344,9 +314,9 @@ export class VaultScanner implements Disposable {
 
       const dailyActivityMultiDim: DailyActivityMultiDim = {
         notes: this.mapToDayActivity(stats.dailyActivity),
-        words: generateDailySeries(new Date(), 90, 3500, 1200),
-        tasks: generateDailySeries(new Date(), 90, 5, 3),
-        agentRuns: generateDailySeries(new Date(), 90, 2, 1.5),
+        words: generateEmptyDailySeries(90),
+        tasks: generateEmptyDailySeries(90),
+        agentRuns: generateEmptyDailySeries(90),
       };
 
       const now = new Date();
@@ -364,7 +334,7 @@ export class VaultScanner implements Disposable {
         inboxFiles: stats.inboxFiles,
         lastScanned: now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
         healthScore: this.calculateHealthScore(stats),
-        weeklyDelta: Math.floor(Math.random() * 10) - 3,
+        weeklyDelta: this.calculateWeeklyDelta(stats.dailyActivity),
       };
 
       // 6. 更新缓存
@@ -528,6 +498,30 @@ export class VaultScanner implements Disposable {
     score -= Math.min(10, Math.floor(stats.orphanNotes / 5));
 
     return Math.max(0, Math.min(100, score));
+  }
+
+  private calculateWeeklyDelta(dailyActivity: Map<string, number>): number {
+    const now = new Date();
+    const thisWeekStart = new Date(now);
+    thisWeekStart.setDate(now.getDate() - now.getDay());
+    thisWeekStart.setHours(0, 0, 0, 0);
+
+    const lastWeekStart = new Date(thisWeekStart);
+    lastWeekStart.setDate(lastWeekStart.getDate() - 7);
+
+    let thisWeekCount = 0;
+    let lastWeekCount = 0;
+
+    for (const [dateStr, count] of dailyActivity.entries()) {
+      const date = new Date(dateStr);
+      if (date >= thisWeekStart) {
+        thisWeekCount += count;
+      } else if (date >= lastWeekStart) {
+        lastWeekCount += count;
+      }
+    }
+
+    return thisWeekCount - lastWeekCount;
   }
 
   // ==================== 主线程让出 ====================

@@ -2,11 +2,11 @@
  * claudeCode.ts — Agent 任务队列
  *
  * Obsidian 插件运行在浏览器沙箱里，不能直接 spawn CLI。
- * 所以插件把 Agent 任务写入 vault 的 .axlumen-tasks/ 目录，
+ * 所以插件把 Agent 任务写入 vault 的 .gulldock-tasks/ 目录，
  * 由外部脚本（Python/Node/npx）或 Claude Code hooks 消费。
  *
  * 文件结构：
- *   .axlumen-tasks/
+ *   .gulldock-tasks/
  *     queue.json          — 待处理任务队列
  *     results/{taskId}.md — 执行结果（外部脚本回写）
  */
@@ -34,7 +34,7 @@ export interface QueueTask {
   status: 'pending';
 }
 
-const TASKS_DIR = '.axlumen-tasks';
+const TASKS_DIR = '.gulldock-tasks';
 const QUEUE_FILE = `${TASKS_DIR}/queue.json`;
 const RESULTS_DIR = `${TASKS_DIR}/results`;
 
@@ -45,8 +45,8 @@ const RESULTS_DIR = `${TASKS_DIR}/results`;
  * 2. 同时生成一个独立的 .md 文件，方便用户直接在 Claude Code 中打开
  *
  * 外部消费方式（任选一种）：
- * - 运行 `npx @anthropic/claude-code@latest -p --input .axlumen-tasks/queue.json`
- * - 配置 Claude Code hooks 监听 .axlumen-tasks/ 目录变化
+ * - 运行 `npx @anthropic/claude-code@latest -p --input .gulldock-tasks/queue.json`
+ * - 配置 Claude Code hooks 监听 .gulldock-tasks/ 目录变化
  * - 用 cron/job 定时轮询 queue.json
  */
 export async function enqueueAgentTask(
@@ -96,7 +96,7 @@ status: pending
 
 # Agent Task: ${task.type}
 
-> 此文件由 Axlumen Dashboard 自动生成
+> 此文件由 GullDock 自动生成
 > 消费方式：在 Claude Code 中打开此文件，或将 prompt 复制到终端执行
 
 ## Prompt
@@ -174,7 +174,7 @@ export async function readTaskResult(vault: Vault, taskId: string): Promise<Serv
  * 优先使用插件设置中的 vaultPath，其次回退到 Node.js 工作目录
  */
 export function getVaultAbsolutePath(app: App): string {
-  const pluginSettings = (app as any).plugins?.plugins?.['axlumen-dashboard']?.settings;
+  const pluginSettings = (app as any).plugins?.plugins?.['gulldock']?.settings;
   if (pluginSettings?.vaultPath) return pluginSettings.vaultPath;
   const adapter = app.vault.adapter as any;
   if (typeof adapter?.getBasePath === 'function') return adapter.getBasePath();

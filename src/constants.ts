@@ -88,7 +88,7 @@ export const HEATMAP_HIGH_THRESHOLD = 5;
 export const AUTO_REFRESH_DEBOUNCE_MS = 500;
 
 /** 存储路径 */
-export const TODOS_FILE_PATH_LEGACY = '.axlumen-todos.json';
-export const TODOS_FILE_PATH = '_axlumen/todos.json';
-export const TODOS_DIR = '_axlumen';
-export const MEMO_STORAGE_KEY = 'axlumen_memo';
+export const TODOS_FILE_PATH_LEGACY = '.gulldock-todos.json';
+export const TODOS_FILE_PATH = '_gulldock/todos.json';
+export const TODOS_DIR = '_gulldock';
+export const MEMO_STORAGE_KEY = 'gulldock_memo';

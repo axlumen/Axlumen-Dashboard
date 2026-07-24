@@ -1,4 +1,4 @@
-# Axlumen Dashboard v2.0
+# GullDock v3.0
 
 个人高密度工作台 Obsidian 插件 — 三 Wiki 统计、Kanban 卡片、Agent 状态监控、多源信息流、自动化任务路由。
 
@@ -37,7 +37,7 @@
 | 卡片 | 说明 |
 |------|------|
 | KPI | Inbox 计数、任务完成率、Vault 评分、本月笔记数、今日完成数、过期数 |
-| Todos | 待办清单 + 进度条，持久到 `.axlumen-todos.json` |
+| Todos | 待办清单 + 进度条，持久到 `_gulldock/todos.json` |
 | Heatmap | 90 天写作热力图（类 GitHub 贡献图） |
 | Workflows | 自动化任务路由（Agent Runner） |
 | Vault Health | 全局索引覆盖率 · 目录结构 · 内容新鲜度 · 日志完整性（满分 100） |
@@ -109,7 +109,7 @@ git clone <repo-url> .obsidian/plugins/axlumen-dashboard
 cd axlumen-dashboard
 npm install
 npm run build
-# 然后到 Obsidian 设置 → 第三方插件 → 启用 Axlumen Dashboard
+# 然后到 Obsidian 设置 → 第三方插件 → 启用 GullDock
 
 # 开发模式（热更新）
 npm run dev
@@ -123,7 +123,7 @@ npm run dev
 
 | 命令 | 功能 |
 |------|------|
-| `打开 Axlumen Dashboard` | 打开主视图 |
+| `打开 GullDock` | 打开主视图 |
 | `刷新 Dashboard 数据` | 强制重新扫描 |
 | `Agent: Run Deep Research` | 启动深度研究工作流 |
 | `Agent: Run Inbox Auto-Routing` | 启动 Inbox AI 路由 |
@@ -137,7 +137,7 @@ npm run dev
 
 ## 配置
 
-插件设置面板（`设置 → 社区插件 → Axlumen Dashboard · 设置`）：
+插件设置面板（`设置 → 社区插件 → GullDock · 设置`）：
 
 | 配置项 | 说明 |
 |--------|------|
@@ -257,7 +257,7 @@ A: 不支持。`manifest.json` 已声明 `isDesktopOnly: true`，插件依赖桌
 
 **Q: 待办数据存在哪里？**
 
-A: 待办数据存储在 Vault 内的 `_axlumen/todos.json`（YAML frontmatter 格式），可被 Obsidian Sync 同步到其他设备。旧路径 `.axlumen-todos.json` 已自动迁移。
+A: 待办数据存储在 Vault 内的 `_gulldock/todos.json`（YAML frontmatter 格式），可被 Obsidian Sync 同步到其他设备。旧路径 `.gulldock-todos.json` 已自动迁移。
 
 **Q: 自动化规则如何工作？**
 
